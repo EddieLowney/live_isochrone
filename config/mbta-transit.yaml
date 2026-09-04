@@ -1,0 +1,99 @@
+# Walk + public transit isochrone for Boston, via a local OpenTripPlanner
+# instance fed by MBTA GTFS and GTFS-RT.
+#
+# Nothing here is metered. OTP runs on your machine, so every cell is measured
+# every cycle and the sampler, pacer and factor reconstructor are all bypassed.
+#
+#   cd otp && ./setup.sh && ./run.sh          # one-time, then leave running
+#   python3 -m isogrid.cli --config config/mbta-transit.yaml baseline
+#   python3 -m isogrid.cli --config config/mbta-transit.yaml serve --port 8000
+
+origin:
+  lat: 42.360363902719726
+  lon: -71.05798898397902
+  label: Downtown Boston — walk + transit
+
+grid:
+  kind: hex
+  cell_km: 0.42        # ~727 m across
+  rings: 6             # 127 cells, covering ~4.7 km
+                       # transit only beats walking past ~1 km, so a 600 m
+                       # grid would show nothing but walking
+
+provider:
+  kind: otp            # otp | synthetic_transit
+  base_url: http://127.0.0.1:8080
+  timezone_name: America/New_York
+  walk_speed_ms: 1.33  # 4.8 km/h, the usual planning default
+  max_transfers: 3
+  max_walk_minutes: 20
+  # Departure-window profiling. A single departure is a snapshot of one
+  # arbitrary moment; with a 15-minute headway it swings by 15 minutes between
+  # cycles for no real reason. 5 samples over 30 minutes costs 5x the local
+  # queries and buys a median plus a spread.
+  profile_window_minutes: 30
+  profile_samples: 5
+  concurrency: 8
+
+store:
+  kind: sqlite
+  path: data/transit-surface.db
+  record_estimates: false  # Under passthrough reconstruction the estimate is
+                           # a copy of the observation, so storing it doubles
+                           # the archive for no information.
+
+budget:
+  ledger:
+    kind: sqlite
+    path: data/transit-budget.db
+  period: daily
+  safety: 1.0
+  quotas:
+    otp: 200000              # a runaway guard, not a bill
+    synthetic_transit: 200000
+  pacer:
+    kind: flat
+    units_per_cycle: 200     # >= cell count: measure everything, every cycle
+
+sampling:
+  kind: staleness            # degenerate when the allowance covers every cell
+
+reconstruct:
+  kind: passthrough
+  # NOT factor or idw. A transit surface is piecewise, with creases where it
+  # becomes better to walk to a different stop. Those creases are the most
+  # informative feature on the map and smooth reconstruction erases them.
+  # Everything is measured anyway, so there is nothing to reconstruct.
+
+mask:
+  kind: composite
+  masks:
+    - kind: quarantine
+      failures_before_quarantine: 3
+      base_backoff_cycles: 24
+      max_backoff_cycles: 2016
+
+engine:
+  cycle_seconds: 300         # transit changes on GTFS-RT timescales
+  refit_every: 100000        # nothing to refit
+  history_cycles: 500
+  validation_holdout: 0      # nothing is reconstructed, so nothing to validate
+  max_batches_per_cycle: 4
+  baseline_from_measurements: false
+
+render:
+  mode: absolute             # travel time, not delay-vs-freeflow
+  absolute_max_minutes: 45
+  delta_range_minutes: [-20, 10]   # transit minus walking; negative = transit wins
+  spread_max_minutes: 20           # p90-p10 across the departure window
+  stale_after_seconds: 1800
+  poll_seconds: 20
+  initial_zoom: 13
+  basemap:
+    enabled: true
+    style: night
+    tile_size: 512
+    cache_dir: data/tiles
+    key_env: TOMTOM_API_KEY
+    budget_key: tomtom_tiles
+    language: en-US

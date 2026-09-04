@@ -1,0 +1,62 @@
+# Small-scale prototype: 37 cells, well inside any free tier.
+origin:
+  lat: 42.3519
+  lon: -71.0552
+  label: South Station, Boston
+
+grid:
+  kind: hex          # hex | square
+  cell_km: 1.5       # circumradius
+  rings: 3           # 3n(n+1)+1 cells -> 37
+
+provider:
+  kind: synthetic    # synthetic | mapbox
+  seed: 7
+  n_factors: 4
+  noise: 0.02
+  failure_rate: 0.0
+  max_coords_per_request: 25
+
+store:
+  kind: sqlite       # sqlite | memory
+  path: data/surface.db
+
+budget:
+  ledger:
+    kind: sqlite     # sqlite | memory
+    path: data/budget.db
+  period: monthly    # monthly | daily | hourly
+  safety: 0.9        # headroom for retries and unroutable-but-billed cells
+  quotas:
+    mapbox: 100000
+    synthetic: 100000
+  pacer:
+    kind: proportional   # proportional | flat | schedule
+    burst: 3.0
+    floor: 1
+
+sampling:
+  kind: probe        # probe | volatility | staleness | round_robin
+  n_probes: 10
+  max_probe_fraction: 0.7   # leave budget for rotation, or the model never learns
+  refresh_every: 288
+
+reconstruct:
+  kind: factor       # factor | idw | passthrough
+  n_components: 4
+  min_cycles: 20
+  min_coverage: 0.05
+
+engine:
+  cycle_seconds: 300
+  refit_every: 12
+  history_cycles: 500
+  validation_holdout: 3
+  max_batches_per_cycle: 8
+
+render:
+  mode: delta                  # delta | absolute
+  absolute_max_minutes: 45
+  delta_range_minutes: [-3, 15]
+  stale_after_seconds: 1800
+  poll_seconds: 15

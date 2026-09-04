@@ -1,0 +1,100 @@
+# First live run against TomTom.
+#
+# Free tier is 2,500 transactions per DAY, so budget.period must be daily.
+# Batching in fives keeps both matrix dimensions inside TomTom's cheap billing
+# branch: 1 transaction per cell instead of 5.
+#
+#   export TOMTOM_API_KEY=...
+#   python3 -m isogrid.cli --config config/tomtom.yaml preflight
+#   python3 -m isogrid.cli --config config/tomtom.yaml seed
+#   python3 -m isogrid.cli --config config/tomtom.yaml serve
+
+origin:
+  lat: 42.360363902719726
+  lon: -71.05798898397902
+  label: Downtown Boston
+
+grid:
+  kind: hex
+  cell_km: 0.099      # circumradius; hexes are ~171 m across
+  rings: 3            # 37 cells, covering ~600 m from the origin
+
+provider:
+  kind: tomtom
+  key_env: TOMTOM_API_KEY
+  batch_size: 5       # do not raise above 5 — billing multiplies by 5 beyond it
+  travel_mode: car
+  min_request_interval_s: 0.25
+
+store:
+  kind: sqlite
+  path: data/tomtom-surface.db
+  record_estimates: true   # keep what the model predicted, for later scoring
+
+budget:
+  ledger:
+    kind: sqlite
+    path: data/tomtom-budget.db
+  period: daily       # TomTom resets daily, not monthly
+  safety: 0.9         # 2,250 usable; headroom covers billed cell failures
+  quotas:
+    tomtom: 2500          # routing: 2,500 non-tile requests/day
+    tomtom_tiles: 50000   # basemap: a separate 50,000 tile requests/day
+  pacer:
+    kind: flat
+    units_per_cycle: 15   # 15 x 144 cycles = 2,160/day, inside the cap
+
+mask:
+  kind: composite
+  masks:
+    # Static geography. Drop in a water layer and these cells never cost a
+    # transaction. TIGER/Line AREAWATER for Suffolk County covers Boston
+    # Harbour and the Charles; convert to GeoJSON or leave as .shp if you
+    # have geopandas installed.
+    # - kind: polygon
+    #   path: data/water.geojson
+    #   min_land_fraction: 0.5
+    #   reason: water
+    #
+    # Learned from the provider. Catches everything the water layer misses:
+    # airport aprons, closed campuses, bad geometry.
+    - kind: quarantine
+      failures_before_quarantine: 3
+      base_backoff_cycles: 144      # one day at 10-minute cycles
+      max_backoff_cycles: 4032      # four weeks
+
+sampling:
+  kind: probe
+  n_probes: 8
+  max_probe_fraction: 0.7
+  refresh_every: 144
+
+reconstruct:
+  kind: factor
+  n_components: 3
+  min_cycles: 20
+  min_coverage: 0.05
+
+engine:
+  cycle_seconds: 600            # 10 minutes
+  refit_every: 12
+  history_cycles: 500
+  validation_holdout: 2
+  max_batches_per_cycle: 8
+  baseline_from_measurements: true   # TomTom returns free-flow every call
+  baseline_ewma_alpha: 0.05
+
+render:
+  mode: delta
+  absolute_max_minutes: 8      # trips are short at this scale
+  delta_range_minutes: [-0.5, 3]
+  stale_after_seconds: 3600
+  poll_seconds: 20
+  basemap:
+    enabled: true
+    style: night          # night | main  (toggleable in the UI)
+    tile_size: 512
+    cache_dir: data/tiles # tiles cached here; delete to force a refetch
+    key_env: TOMTOM_API_KEY
+    budget_key: tomtom_tiles
+    language: en-US

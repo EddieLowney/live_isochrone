@@ -1,0 +1,39 @@
+{
+  "routingDefaults": {
+    "walkSpeed": 1.33,
+    "maxTransfers": 3,
+    "transferSlack": "2m",
+    "streetRoutingTimeout": "5s",
+    "accessEgress": {
+      "maxDuration": "20m"
+    }
+  },
+  "transit": {
+    "maxNumberOfTransfers": 4,
+    "dynamicSearchWindow": {
+      "minWindow": "30m",
+      "maxWindow": "3h"
+    }
+  },
+  "updaters": [
+    {
+      "type": "stop-time-updater",
+      "feedId": "MBTA",
+      "frequency": "30s",
+      "url": "https://cdn.mbta.com/realtime/TripUpdates.pb",
+      "backwardsDelayPropagationType": "REQUIRED_NO_DATA"
+    },
+    {
+      "type": "vehicle-positions",
+      "feedId": "MBTA",
+      "frequency": "30s",
+      "url": "https://cdn.mbta.com/realtime/VehiclePositions.pb"
+    },
+    {
+      "type": "real-time-alerts",
+      "feedId": "MBTA",
+      "frequency": "60s",
+      "url": "https://cdn.mbta.com/realtime/Alerts.pb"
+    }
+  ]
+}

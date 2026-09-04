@@ -1,0 +1,208 @@
+# Walk + public transit, routed by the built-in RAPTOR rather than OTP.
+#
+# One search per cycle labels every stop at once, then a min-plus product lands
+# it on cells. Per-cycle cost does not depend on how many cells there are, so
+# raising the resolution is free.
+#
+# OTP is still needed once, to build accurate walking layers:
+#   walk_source: otp  ->  a one-off pass of walk queries, then cached forever
+#
+#   python3 -m isogrid.cli --config config/mbta-raptor.yaml baseline
+#   python3 -m isogrid.cli --config config/mbta-raptor.yaml serve --port 8001 --port 8000
+
+origin:
+  lat: 42.343291
+  lon: -71.090291
+  label: Boston — walk + transit
+
+grid:
+  kind: hex
+  cell_km: 0.0255      # ~44 m across. This is at the edge of what the data
+                       # supports: OSM sidewalk nodes sit 10-40 m apart, so
+                       # neighbouring cells increasingly snap to the same node
+                       # and stop being genuinely distinguishable.
+  rings: 36            # 3,997 cells over ~1.6 km — two thirds the previous
+                       # radius at the same cell count. Compute is unchanged
+                       # (RAPTOR ignores cell count; compose is ~0.12 s), and
+                       # the payload is unchanged at ~2.2 MB.
+                       # transit only beats walking past ~1 km, so a 600 m
+                       # grid would show nothing but walking
+
+provider:
+  kind: raptor
+  gtfs_path: otp/mbta.gtfs.zip
+  cache_dir: data/raptor
+  trip_updates_url: https://cdn.mbta.com/realtime/TripUpdates.pb
+  timezone_name: America/New_York
+
+  # graph        shortest paths on a local OSM pedestrian network. Accurate at
+  #              barriers, and cost does not scale with pair count — one
+  #              bounded Dijkstra per source labels every destination.
+  # straight_line haversine x 1.35. Fine on open grid, ~4x optimistic across
+  #              the Charles or the Pike. Instant, no setup.
+  # otp          walk-only queries against the running OTP. Same accuracy as
+  #              graph but one HTTP request per pair, so it does not scale.
+  walk_source: graph
+  osm_pbf: otp/boston.osm.pbf   # the extract otp/setup.sh already cropped
+  max_snap_m: 250               # a cell centre further than this from any way
+                                # is unreachable rather than silently snapped
+  crossing_penalty_s: 0         # seconds added per marked crossing; 20-30 is
+                                # a reasonable guess for signalised streets
+  otp_url: http://127.0.0.1:8080
+  walk_speed_ms: 1.33
+  walk_detour: 1.35
+
+  # Caps are a computational bound, not a behavioural one — the minimisation
+  # already discards slower options, so a cap can only make answers worse by
+  # deleting a candidate that would have won. They exist because they prune
+  # Dijkstra's search, which is where the speed comes from.
+  access_walk_s: 1800    # origin -> boarding stop. One extra Dijkstra; free.
+  transfer_walk_s: 450   # stop -> stop. The only one in the hot path: footpaths
+                         # are relaxed 4 rounds x 31 samples = 124x per cycle,
+                         # and pair count grows with the square of the radius.
+                         # Watch stat_raptor_s if you raise it further.
+  egress_walk_s: 1800    # stop -> cell, the min-plus term. One-time build cost,
+                         # roughly quadratic in the cap; ~70 s at this setting.
+  direct_walk_s: 9000    # origin -> cell. Must exceed the walk time to the
+                         # far edge of the grid, or distant cells come back
+                         # unreachable instead of merely slow. 4.9 km is a
+                         # ~61 min walk, so 150 min leaves ample room.
+
+  max_rounds: 4          # 4 rounds = up to 3 transfers
+  min_transfer_time: 0
+
+  # Range-RAPTOR sweeps the window in one pass, so extra samples are nearly
+  # free here — unlike the OTP provider, where each one is a separate query.
+  # Sample finely. The quantity is a sawtooth with a period of one headway,
+  # so 6 samples over 30 minutes aliases a 10-minute headway into noise.
+  profile_window_minutes: 30
+  profile_samples: 31          # every 58 s
+  cliff_threshold_s: 120       # a jump this big counts as "missed it"
+
+  realtime: true
+  realtime_max_age_s: 25     # just under the cycle, so every cycle re-checks.
+                             # Conditional requests make a re-check nearly free
+                             # when the feed has not changed.
+
+store:
+  kind: sqlite
+  path: data/raptor-surface.db
+  record_estimates: false  # Under passthrough reconstruction the estimate is
+                           # a copy of the observation, so storing it doubles
+                           # the archive for no information.
+
+budget:
+  ledger:
+    kind: sqlite
+    path: data/raptor-budget.db
+  period: daily
+  safety: 1.0
+  quotas:
+    raptor: 200000           # one unit per cycle; purely a runaway guard
+    synthetic_transit: 200000
+  pacer:
+    kind: flat
+    # Must exceed the cell count, or the sampler silently measures a rotating
+    # subset and the egress matrix is rebuilt for it every cycle. RAPTOR bills
+    # one unit per cycle regardless, so this is only a runaway guard.
+    units_per_cycle: 5000
+
+sampling:
+  kind: staleness            # degenerate when the allowance covers every cell
+
+reconstruct:
+  kind: passthrough
+  # NOT factor or idw. A transit surface is piecewise, with creases where it
+  # becomes better to walk to a different stop. Those creases are the most
+  # informative feature on the map and smooth reconstruction erases them.
+  # Everything is measured anyway, so there is nothing to reconstruct.
+
+mask:
+  kind: composite
+  masks:
+    - kind: quarantine
+      failures_before_quarantine: 3
+      base_backoff_cycles: 24
+      max_backoff_cycles: 2016
+
+engine:
+  cycle_seconds: 30          # MBTA republishes GTFS-RT roughly every 30 s, so
+                             # cycling faster than this gains nothing real.
+  archive_every: 20          # Write observations every Nth cycle. At 30 s
+                             # cycles and 4,000 cells that is one row per cell
+                             # per 10 minutes, or ~575k rows a day. Writing
+                             # every cycle would be 11.5 million.
+  refit_every: 100000        # nothing to refit
+  history_cycles: 500
+  validation_holdout: 0      # nothing is reconstructed, so nothing to validate
+  max_batches_per_cycle: 4
+  baseline_from_measurements: false
+
+render:
+  mode: absolute             # travel time, not delay-vs-freeflow
+  # Match these to the range the data actually occupies. A scale set for a
+  # 5 km grid leaves a 2.4 km one sitting in the ramp's lowest third, and no
+  # palette recovers contrast the normalisation has already thrown away.
+  # Check the real spread with:  python3 -c "$(cat <<'EOF'
+  # import json,urllib.request
+  # d=json.load(urllib.request.urlopen('http://127.0.0.1:8001/api/geojson'))
+  # v=sorted(f['properties']['live_s']/60 for f in d['features']
+  #          if f['properties']['live_s'])
+  # print(f'p5 {v[len(v)//20]:.0f}  median {v[len(v)//2]:.0f}  p95 {v[-len(v)//20]:.0f} min')
+  # EOF
+  # )"
+  absolute_min_minutes: 2          # nothing from the origin is faster than this
+  absolute_max_minutes: 20         # 1.6 km radius; the far edge is a ~30 min walk
+  delta_range_minutes: [-15, 8]    # transit minus walking; negative = transit wins
+  spread_max_minutes: 20           # p90-p10 across the departure window
+  cliff_max_minutes: 15            # "leave by" scale; red = go now
+  stale_after_seconds: 1800
+  poll_seconds: 20
+  initial_zoom: 14
+  overlays:
+    enabled: true
+    routes_radius_km: 5          # route lines are static; built once and cached
+    vehicles_min_refresh_s: 5    # floor on upstream polling, regardless of how
+                                 # many browser tabs are open. Measured fix
+                                 # intervals: bus 6 s median, subway 21 s, so
+                                 # 5 s never misses one.
+                                 # There is no playback buffer setting. The
+                                 # browser plays completed legs in order and
+                                 # halts at the newest fix, so a vehicle is
+                                 # exactly one fix behind — the most that can
+                                 # be shown without guessing.
+    vehicle_max_age_s: 180       # drop vehicles that stopped reporting. Median
+                                 # arrival lag is 9 s; a position minutes old is
+                                 # a ghost, and animating it would be fiction.
+    shapes_radius_km: 12         # geometry is indexed once and cached
+    stations_radius_km: 6        # station markers; static, built once
+    station_modes: [subway, light rail]
+                                 # Rapid transit only. Including bus would add
+                                 # hundreds of markers 200 m apart and bury the
+                                 # field. Platforms collapse onto their parent
+                                 # station, so Park Street is one marker.
+    vehicle_modes: [subway, light rail]
+                                 # Which modes to animate. Buses report every
+                                 # 6 s and move ~37 m between fixes, under one
+                                 # cell, so interpolating them is work for no
+                                 # visible gain — and they are ~90% of the
+                                 # ~245 vehicles. Add "bus", "commuter rail"
+                                 # or "ferry" to include them.
+    vehicles_url: https://cdn.mbta.com/realtime/VehiclePositions.pb
+
+  basemap:
+    enabled: true
+    style: night
+    tile_size: 512
+    labels: false            # false -> a label-free CARTO base (keyless).
+                             # TomTom bakes labels into its raster base, so
+                             # there is no way to suppress them from that
+                             # source; the two settings below only apply when
+                             # labels: true.
+    labels_min_zoom: 13
+    labels_opacity: 0.55
+    base_opacity: 1.0        # dim the ground layer to push the field forward
+    cache_dir: data/tiles
+    key_env: TOMTOM_API_KEY
+    budget_key: tomtom_tiles
+    language: en-US

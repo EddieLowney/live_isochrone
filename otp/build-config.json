@@ -1,0 +1,25 @@
+{
+  "osmDefaults": {
+    "timeZone": "America/New_York"
+  },
+  "transitFeeds": [
+    {
+      "type": "gtfs",
+      "source": "mbta.gtfs.zip",
+      "feedId": "MBTA"
+    }
+  ],
+  "osm": [
+    {
+      "source": "boston.osm.pbf"
+    }
+  ],
+  "subwayAccessTime": 2.0,
+  "maxTransferDuration": "30m",
+  "streets": true,
+  "transit": true,
+  "areaVisibility": true,
+  "platformEntriesLinking": true,
+  "staticParkAndRide": false,
+  "staticBikeParkAndRide": false
+}

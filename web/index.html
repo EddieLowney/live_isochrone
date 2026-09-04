@@ -1,0 +1,1305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Travel time field</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css">
+<style>
+  :root {
+    --ground: #16202a; --panel: #1e2a36; --panel-2: #24313e;
+    --line: #2e3e4c; --line-soft: #26333f;
+    --ink: #dce4ea; --ink-dim: #93a5b3; --ink-faint: #667988;
+    --sand: #e0a458;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: 14px; line-height: 1.5; overflow: hidden;
+  }
+  .shell { display: grid; grid-template-columns: 1fr 306px; gap: 1px; background: var(--line-soft); height: 100vh; }
+  .stage { position: relative; background: var(--ground); }
+  #map { position: absolute; inset: 0; }
+  .rail { background: var(--panel); padding: 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
+  @media (max-width: 880px) {
+    .shell { grid-template-columns: 1fr; grid-template-rows: 60vh 1fr; }
+    body { overflow: auto; }
+  }
+
+  .overlay-head {
+    position: absolute; top: 12px; left: 12px; z-index: 2;
+    background: rgba(22,32,42,.88); backdrop-filter: blur(6px);
+    border: 1px solid var(--line); border-radius: 6px; padding: 9px 13px;
+  }
+  h1 { font-size: 14px; font-weight: 500; margin: 0; }
+  .sub { font-family: var(--mono); font-size: 10px; color: var(--ink-faint); letter-spacing: .07em; text-transform: uppercase; }
+  .tip {
+    position: absolute; bottom: 12px; left: 12px; z-index: 2;
+    background: rgba(22,32,42,.88); backdrop-filter: blur(6px);
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px;
+    font-family: var(--mono); font-size: 11px; color: var(--ink-dim); max-width: 70%;
+  }
+
+  .block { display: flex; flex-direction: column; gap: 9px; }
+  .label { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); }
+
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .seg button {
+    flex: 1; background: transparent; border: 0; color: var(--ink-dim); cursor: pointer;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; padding: 7px 4px;
+  }
+  .seg button[aria-pressed="true"] { background: var(--panel-2); color: var(--ink); }
+  .seg button:focus-visible { outline: 2px solid var(--sand); outline-offset: -2px; }
+
+  input[type=range] { width: 100%; accent-color: var(--sand); }
+
+  .ramp { display: flex; height: 9px; border-radius: 2px; overflow: hidden; }
+  .ramp span { flex: 1; }
+  .ends { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
+  .key { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-dim); }
+
+  .meter { height: 9px; background: var(--panel-2); border-radius: 2px; position: relative; overflow: hidden; }
+  .meter i { position: absolute; inset: 0 auto 0 0; background: var(--sand); display: block; }
+  .meter b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink); }
+
+  dl { margin: 0; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; font-family: var(--mono); font-size: 12px; }
+  dt { color: var(--ink-faint); }
+  dd { margin: 0; text-align: right; }
+  .warn { font-family: var(--mono); font-size: 11px; color: var(--sand); }
+
+  .maplibregl-ctrl-attrib { font-size: 10px; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <main class="stage">
+    <div id="map"></div>
+    <div class="overlay-head">
+      <h1 id="title">Travel time field</h1>
+      <div class="sub" id="subtitle">connecting</div>
+    </div>
+    <div class="tip" id="tip">Hover a cell for detail.</div>
+  </main>
+
+  <aside class="rail">
+    <div class="block">
+      <span class="label">Colour by</span>
+      <div class="seg" role="group" aria-label="Colour mode">
+        <button id="m-abs" aria-pressed="false">Travel time</button>
+        <button id="m-delta" aria-pressed="true">vs walking</button>
+        <button id="m-spread" aria-pressed="false" hidden>Reliability</button>
+        <button id="m-cliff" aria-pressed="false" hidden>Leave by</button>
+      </div>
+    </div>
+
+    <div class="block">
+      <span class="label">Basemap</span>
+      <div class="seg" role="group" aria-label="Basemap style">
+        <button id="b-night" aria-pressed="true">Night</button>
+        <button id="b-main" aria-pressed="false">Day</button>
+      </div>
+      <span class="label" style="margin-top:4px">Surface</span>
+      <div class="seg" role="group" aria-label="Surface rendering">
+        <button id="f-field" aria-pressed="true">Field</button>
+        <button id="f-cells" aria-pressed="false">Cells</button>
+      </div>
+      <span class="label" style="margin-top:4px">Overlay opacity <span id="op-val">55%</span></span>
+      <input type="range" id="opacity" min="0" max="100" value="55"
+             aria-label="Hex overlay opacity">
+    </div>
+
+    <div class="block">
+      <span class="label">Scale</span>
+      <div class="ramp" id="ramp"></div>
+      <div class="ends"><span id="ramp-lo"></span><span id="ramp-hi"></span></div>
+      <div class="key" id="key-measured" hidden>
+        <svg width="15" height="15" aria-hidden="true"><circle cx="7.5" cy="7.5" r="3.2" fill="none" stroke="#fff" stroke-width="1.4"/></svg>
+        Measured this cycle
+      </div>
+      <div class="key">
+        <svg width="15" height="15" aria-hidden="true"><rect x="1" y="4" width="13" height="8" fill="#4a90c2" opacity=".5"/></svg>
+        Reconstructed
+      </div>
+      <div class="key">
+        <svg width="15" height="15" aria-hidden="true"><circle cx="7.5" cy="7.5" r="4" fill="#ffffff" stroke="#0d141b"/></svg>
+        Station
+      </div>
+      <div class="key" id="key-excluded">
+        <svg width="15" height="15" aria-hidden="true"><rect x="1" y="4" width="13" height="8" fill="none" stroke="#667988" stroke-dasharray="3 2"/></svg>
+        Excluded (no route)
+      </div>
+      <div class="key" id="key-faded" hidden>
+        <svg width="15" height="15" aria-hidden="true">
+          <defs><linearGradient id="kg" x1="0" x2="1"><stop offset="0" stop-color="#2171b5"/><stop offset="1" stop-color="#2171b5" stop-opacity="0"/></linearGradient></defs>
+          <rect x="1" y="4" width="13" height="8" fill="url(#kg)"/>
+        </svg>
+        Fading out (no route)
+      </div>
+    </div>
+
+    <div class="block">
+      <span class="label">Routing quota</span>
+      <div class="meter"><i id="meter-fill"></i><b id="meter-target"></b></div>
+      <div class="ends"><span id="meter-left">—</span><span id="meter-pct">—</span></div>
+      <div class="warn" id="warn"></div>
+    </div>
+
+    <div class="block">
+      <span class="label">Last cycle</span>
+      <dl>
+        <dt>cycle</dt><dd id="s-cycle">—</dd>
+        <dt>spent</dt><dd id="s-spent">—</dd>
+        <dt>measured</dt><dd id="s-meas">—</dd>
+        <dt>masked</dt><dd id="s-masked">—</dd>
+        <dt>holdout MAE</dt><dd id="s-mae">—</dd>
+      </dl>
+    </div>
+
+    <div class="block" id="transit-block" hidden>
+      <span class="label">Transit</span>
+      <dl>
+        <dt>transit beats walk</dt><dd id="t-wins">—</dd>
+        <dt>median spread</dt><dd id="t-spread">—</dd>
+        <dt>median wait</dt><dd id="t-wait">—</dd>
+        <dt>median transfers</dt><dd id="t-xfer">—</dd>
+        <dt>median leave-by</dt><dd id="t-cliff">—</dd>
+      </dl>
+    </div>
+
+    <div class="block">
+      <span class="label">Model</span>
+      <dl>
+        <dt>type</dt><dd id="r-type">—</dd>
+        <dt>cells modelled</dt><dd id="r-cells">—</dd>
+        <dt>var explained</dt><dd id="r-evr">—</dd>
+        <dt>tiles cached</dt><dd id="r-tiles">—</dd>
+        <dt>routes drawn</dt><dd id="r-routes">—</dd>
+        <dt>stations</dt><dd id="r-stations">—</dd>
+        <dt>vehicles live</dt><dd id="r-vehicles">—</dd>
+        <dt>position age</dt><dd id="r-vage">—</dd>
+        <dt>on track</dt><dd id="r-vtrack">—</dd>
+        <dt>held / reshaped</dt><dd id="r-vheld">—</dd>
+        <dt>field mesh</dt><dd id="r-field">—</dd>
+      </dl>
+    </div>
+  </aside>
+</div>
+
+<script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+<script>
+/* ------------------------------------------------------------------ *
+ * EXTENSION POINT
+ *
+ * Extra GeoJSON overlays. Each entry becomes a MapLibre source plus one
+ * or more layers, refreshed on the same poll as the cell grid. This is
+ * where road-segment colouring or a transit layer plugs in — serve the
+ * geometry from a new endpoint and add an entry here. Nothing else in
+ * this file needs to change.
+ *
+ *   { id: 'roads',
+ *     url: '/api/roads.geojson',
+ *     before: 'labels',                       // draw beneath the label tiles
+ *     layers: [{ id:'roads-line', type:'line',
+ *                paint:{ 'line-color':['get','_color'], 'line-width':2.5 } }],
+ *     colour: (f, mode, cfg) => rampColour(mode, normalise(mode, f.properties, cfg))
+ *   }
+ * ------------------------------------------------------------------ */
+const OVERLAYS = [];
+
+const S = { mode: 'delta', basemap: 'night', opacity: 0.55, cfg: null, map: null,
+            poll: 20000, smooth: true };
+
+const RAMPS = {
+  // Nine stops rather than five. The extra stops are not decoration: linear
+  // interpolation between widely spaced colours bands visibly at this cell
+  // size, and the range from near-white to near-black navy is what makes a
+  // four-minute difference legible at a glance.
+  absolute: ['#f7fbff', '#deebf7', '#c6dbef', '#9ecae1', '#6baed6',
+             '#4292c6', '#2171b5', '#08519c', '#08306b'],
+  delta:    ['#053061', '#2166ac', '#4393c3', '#92c5de', '#f2efe9',
+             '#f4a582', '#d6604d', '#b2182b', '#67001f'],
+  spread:   ['#f7fcf5', '#d3eecd', '#a1d99b', '#65bc62',
+             '#2f984f', '#12712e', '#00441b'],
+  // Reversed on purpose: red means "go now", not "bad".
+  cliff:    ['#a8342b', '#c96b4d', '#c9a24d', '#7f9b6a', '#4a6b52'],
+};
+const hex2rgb = h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
+const mix = (a, b, t) => {
+  const x = hex2rgb(a), y = hex2rgb(b);
+  return '#' + [0,1,2].map(i => Math.round(x[i] + (y[i]-x[i])*t).toString(16).padStart(2,'0')).join('');
+};
+function rampColour(mode, v) {
+  if (v == null) return '#3a4552';
+  const st = RAMPS[mode];
+  const t = Math.max(0, Math.min(0.9999, v)) * (st.length - 1);
+  const i = Math.floor(t);
+  return mix(st[i], st[i+1], t - i);
+}
+function normalise(mode, p, cfg) {
+  if (mode === 'cliff') {
+    // Seconds until this cell's journey time jumps. null = no cliff in the
+    // sampled window, i.e. service frequent enough that timing barely matters.
+    if (p.next_jump_s == null) return null;
+    return (p.next_jump_s/60) / (cfg.cliff_max_minutes || 15);
+  }
+  if (mode === 'spread') {
+    // p90 - p10 across the departure window: how much worse it gets if you
+    // reach the stop at a bad moment. Roughly the headway penalty.
+    if (p.spread_s == null) return null;
+    return (p.spread_s/60) / (cfg.spread_max_minutes || 20);
+  }
+  if (mode === 'delta') {
+    if (p.delta_s == null) return null;
+    const [lo, hi] = cfg.delta_range_minutes;
+    return (p.delta_s/60 - lo) / (hi - lo);
+  }
+  if (p.live_s == null) return null;
+  // Stretch the ramp over the range the data actually occupies. A scale set
+  // for a 5 km grid squeezes a 2.4 km one into its lowest third, and no
+  // palette recovers contrast that the normalisation has already thrown away.
+  const lo = cfg.absolute_min_minutes || 0;
+  const hi = cfg.absolute_max_minutes;
+  return (p.live_s/60 - lo) / (hi - lo);
+}
+function hasTransit(fc) {
+  return (fc.features || []).some(f => f.properties.spread_s != null);
+}
+
+// ['get','x'] has expression type `value`, and `case` requires `boolean`.
+// Passing it raw fails style validation. to-boolean makes the coercion explicit.
+const MASKED = ['to-boolean', ['get', 'masked']];
+const labelsMinZoom = () =>
+  (S.cfg && S.cfg.render.basemap && S.cfg.render.basemap.labels_min_zoom) ?? 13;
+const labelsOpacity = () =>
+  (S.cfg && S.cfg.render.basemap && S.cfg.render.basemap.labels_opacity) ?? 0.65;
+const fillOpacity = () => ['case', MASKED, 0.10, S.opacity];
+
+//: CARTO publish label-free raster basemaps, free and keyless, built for
+//: exactly this: a ground layer that carries geography without competing with
+//: the data on top. TomTom's raster `basic` bakes labels into the base tiles,
+//: so there is no way to remove them from that source — the `labels` overlay
+//: is a second copy drawn above the hexes, and hiding it leaves the originals.
+const NOLABEL_TILES = {
+  night: ['a', 'b', 'c', 'd'].map(s =>
+    `https://${s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}.png`),
+  main: ['a', 'b', 'c', 'd'].map(s =>
+    `https://${s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}.png`),
+};
+
+function styleSpec() {
+  const base = (S.cfg && S.cfg.render.basemap) || {};
+  const labelled = base.labels !== false;
+  const attrib = labelled
+    ? '&copy; TomTom'
+    : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' +
+      ' contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>';
+  const origin = location.origin;
+  return {
+    version: 8,
+    sources: {
+      base: labelled
+        ? { type: 'raster', tileSize: 512, attribution: attrib, maxzoom: 20,
+            tiles: [`${origin}/tiles/basic/${S.basemap}/{z}/{x}/{y}.png`] }
+        : { type: 'raster', tileSize: 256, attribution: attrib, maxzoom: 20,
+            tiles: NOLABEL_TILES[S.basemap] || NOLABEL_TILES.night },
+      // Transparent overlay carrying only labels, precisely aligned with the
+      // base layer. Drawn ABOVE the hex fill so street names stay readable
+      // through the colour — the whole reason to use a raster sandwich.
+      ...(labelled ? { labeltiles: {
+        type: 'raster', tileSize: 512, maxzoom: 20,
+        tiles: [`${origin}/tiles/labels/${S.basemap}/{z}/{x}/{y}.png`] } } : {}),
+      // Replaced on the first data update; a 1x1 transparent GIF only exists
+      // because an image source will not load without a valid url.
+      field: { type: 'image',
+               url: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+               coordinates: [[-0.01,0.01],[0.01,0.01],[0.01,-0.01],[-0.01,-0.01]] },
+      cells: { type: 'geojson', data: { type:'FeatureCollection', features: [] } },
+      probes: { type: 'geojson', data: { type:'FeatureCollection', features: [] } },
+      routes: { type: 'geojson', data: { type:'FeatureCollection', features: [] } },
+      stations: { type: 'geojson', data: { type:'FeatureCollection', features: [] } },
+      vehicles: { type: 'geojson', data: { type:'FeatureCollection', features: [] } },
+    },
+    layers: [
+      { id: 'base', type: 'raster', source: 'base',
+        paint: { 'raster-opacity': base.base_opacity ?? 1 } },
+      // Route lines sit under the hexes: they explain the field without
+      // competing with it. Bus is thin and dim because there are hundreds of
+      // them; rapid transit is what the eye should find first.
+      { id: 'routes-bus', type: 'line', source: 'routes',
+        filter: ['==', ['get', 'kind'], 'bus'],
+        paint: { 'line-color': ['get', 'color'], 'line-width': 1,
+                 'line-opacity': 0.30 } },
+      { id: 'routes-rail', type: 'line', source: 'routes',
+        filter: ['!=', ['get', 'kind'], 'bus'],
+        paint: { 'line-color': ['get', 'color'],
+                 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.8, 15, 4],
+                 'line-opacity': 0.85 },
+        layout: { 'line-cap': 'round', 'line-join': 'round' } },
+      // Sits exactly where the hex fill sits, so everything above it — labels,
+      // stations, vehicles — keeps its stacking. The two are mutually
+      // exclusive; `updateField` toggles visibility.
+      { id: 'field', type: 'raster', source: 'field',
+        layout: { visibility: 'none' },
+        paint: { 'raster-opacity': S.opacity,
+                 // Bilinear, so the limit on sharpness stays the 44 m
+                 // measurement spacing rather than the texture's own grid.
+                 'raster-resampling': 'linear',
+                 // Without this every update cross-fades over the previous
+                 // one, which reads as the whole field pulsing.
+                 'raster-fade-duration': 0 } },
+      { id: 'cells-fill', type: 'fill', source: 'cells',
+        paint: { 'fill-color': ['get','_color'], 'fill-opacity': fillOpacity() } },
+      // Two outline layers rather than one. line-dasharray is a cross-faded
+      // property: it accepts zoom expressions but NOT data-driven ones, so a
+      // a per-feature branch here aborts style loading and the map renders
+      // nothing at all. Filters are the supported way to branch per feature.
+      // Hairline stroke in the cell's own colour. Not a grid — without it,
+      // antialiasing leaves visible seams between adjacent fills and the
+      // field looks tiled. Matching the fill closes the seam invisibly.
+      { id: 'cells-line', type: 'line', source: 'cells', filter: ['!', MASKED],
+        paint: { 'line-color': ['get', '_color'], 'line-width': 1,
+                 'line-opacity': fillOpacity() } },
+      { id: 'cells-line-masked', type: 'line', source: 'cells', filter: MASKED,
+        paint: { 'line-color': '#667988', 'line-width': 0.8,
+                 'line-opacity': 0.7, 'line-dasharray': [2, 2] } },
+      // TomTom's label overlay is raster, so individual labels cannot be
+      // filtered. What can be done is hold them back until the zoom where
+      // they are useful, and let them sit under the colour rather than over
+      // it. Vector tiles would allow true per-class filtering.
+      ...(labelled ? [{
+        id: 'labels', type: 'raster', source: 'labeltiles',
+        minzoom: labelsMinZoom(),
+        paint: { 'raster-opacity': labelsOpacity() },
+      }] : []),
+      // Stations sit above the field but below the vehicles: they are
+      // landmarks that make the route geometry readable, not another data
+      // layer competing with the travel-time colours.
+      { id: 'stations-halo', type: 'circle', source: 'stations',
+        paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'],
+                                   11, 4, 14, 6.5, 17, 10],
+                 'circle-color': '#0d141b', 'circle-opacity': 0.75 } },
+      { id: 'stations-dot', type: 'circle', source: 'stations',
+        paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'],
+                                   11, 2.2, 14, 4, 17, 6.5],
+                 // Interchanges read slightly heavier than single-line stops.
+                 'circle-color': ['case', ['>', ['get', 'n_routes'], 1],
+                                  '#ffffff', '#c9d4dd'],
+                 'circle-stroke-color': '#0d141b',
+                 'circle-stroke-width': 1 } },
+      // Vehicles ride above the label tiles — they are the only thing on the
+      // map that moves, and burying them defeats the point.
+      { id: 'vehicles-halo', type: 'circle', source: 'vehicles',
+        paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3.5, 15, 7],
+                 'circle-color': '#0d141b', 'circle-opacity': 0.55 } },
+      { id: 'vehicles-dot', type: 'circle', source: 'vehicles',
+        paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2, 15, 4.5],
+                 'circle-color': ['get', '_color'],
+                 // Fade a vehicle whose position has gone stale rather than
+                 // showing it as confidently as a fresh one.
+                 // Fade anything the playhead has run past: the buffer has
+                 // underrun and the marker is being held, not tracked.
+                 'circle-opacity': ['case', ['to-boolean', ['get', '_stalled']], 0.3,
+                                    ['>', ['get', 'age_s'], 120], 0.45, 1],
+                 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 0.8 } },
+      // Provenance markers, drawn only where provenance is a real question.
+      // Fixed-radius dots at low zoom become the entire map, so both the
+      // radius and the stroke fade out below the cell size.
+      { id: 'probe-dots', type: 'circle', source: 'probes', minzoom: 13,
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'],
+                            13, 0.6, 15, 2, 17, 3.5],
+          'circle-color': 'rgba(0,0,0,0)',
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': ['interpolate', ['linear'], ['zoom'],
+                                  13, 0.4, 15, 0.9, 17, 1.3],
+          'circle-stroke-opacity': ['interpolate', ['linear'], ['zoom'],
+                                    13, 0.25, 15, 0.7, 17, 0.9] } },
+    ],
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Continuous field.
+ *
+ * A flat hex fill asserts a step change at every cell boundary, and that step
+ * is an artefact of the sampling lattice rather than anything in the city.
+ * Cell centres are 44.2 m apart and the pedestrian graph underneath them has
+ * nodes 10-40 m apart, so linear interpolation between two adjacent
+ * *measured* centres claims strictly less than the step does.
+ *
+ * The hex lattice triangulates without a Delaunay pass. With the axial layout
+ * in grid.py, {(q,r), (q+1,r), (q,r+1)} and {(q,r), (q+1,r-1), (q+1,r)} are
+ * both equilateral with side cell_km*sqrt(3) — two triangles per cell, each
+ * shaded barycentrically from its three vertices.
+ *
+ * Two rules keep this a rendering change rather than a data change:
+ *
+ *   - The *scalar* is interpolated, never the colour. Blending RGB through a
+ *     ramp produces colours the ramp maps to no value at all — on a diverging
+ *     ramp, mixing a strong negative with a strong positive lands on the pale
+ *     midpoint and asserts the opposite of both.
+ *   - A triangle with no measured vertex at all is not drawn, so nothing is
+ *     invented in the middle of the water. A triangle with one or two measured
+ *     vertices *is* drawn, with alpha falling to zero at the unreachable
+ *     corners: the surface dissolves into the basemap over 44 m rather than
+ *     ending at a hard hexagonal edge. That fade is a deliberate, bounded
+ *     inaccuracy — the colour under it is the mean of the triangle's own
+ *     measured corners — and it buys a continuous boundary, which is the point
+ *     of the whole layer. Nothing is extrapolated past the measured hull.
+ *
+ * MapLibre cannot shade a polygon per vertex — `fill-color` is flat and
+ * `line-gradient` only applies to lines — so the mesh is rasterised into an
+ * offscreen canvas and handed over as an `image` source. The grid never moves,
+ * so this runs once per data update and MapLibre resamples on pan and zoom for
+ * free. A `canvas` source would avoid the PNG encode, but with `animate: false`
+ * it does not pick up redraws, and `animate: true` re-uploads the whole texture
+ * every frame.
+ * ------------------------------------------------------------------ */
+
+//: Texture width. The data is 44 m; this gives ~1.6 m/px over the default
+//: extent, so what limits sharpness is the measurement spacing rather than the
+//: raster. Raising it costs rasterisation time, not fidelity.
+const FIELD_PX = 2048;
+
+//: How far the surface reaches into unreachable ground before it is fully
+//: transparent, in cells. At 44.2 m spacing, four rings is ~175 m of fade —
+//: enough that the Charles dissolves the surface rather than punching a shape
+//: out of it. One ring (a fade only as wide as a single cell) still left the
+//: interiors of the larger regions as hard-edged dark patches.
+const FIELD_FADE_RINGS = 4;
+
+const FIELD = { canvas: null, lut: null, lutMode: null, stats: null, timer: 0 };
+
+//: Values and opacities for every cell, measured or not.
+//:
+//: Measured cells keep their own value at full opacity. Unreachable ones are
+//: filled by breadth-first diffusion outward from the measured boundary — each
+//: ring averaging the ring inside it — and their opacity falls linearly to zero
+//: over FIELD_FADE_RINGS. So the colour over water is a plausible continuation
+//: of the shore rather than a guess out of nowhere, and it is never shown at
+//: an opacity that would pass for a measurement.
+//:
+//: This is the deliberate inaccuracy in the layer. It is bounded to cells that
+//: carry no measurement, it never touches a measured value, and it is always
+//: drawn at reduced opacity.
+function fieldSurface(mesh, mode, cfg) {
+  const val = new Map(), alpha = new Map();
+  let frontier = [];
+  for (const [k, c] of mesh.cell) {
+    const v = fieldValue(c.p, mode, cfg);
+    if (v !== null) { val.set(k, v); alpha.set(k, 255); frontier.push(k); }
+  }
+  const nbrs = k => {
+    const s = k.split(','), q = +s[0], r = +s[1];
+    return [[q+1,r],[q-1,r],[q,r+1],[q,r-1],[q+1,r-1],[q-1,r+1]]
+      .map(a => a[0] + ',' + a[1]);
+  };
+  for (let ring = 1; ring <= FIELD_FADE_RINGS && frontier.length; ring++) {
+    const next = [], acc = new Map();
+    for (const k of frontier) {
+      for (const n of nbrs(k)) {
+        if (!mesh.cell.has(n) || val.has(n)) continue;
+        const a = acc.get(n) || [0, 0];
+        a[0] += val.get(k); a[1] += 1;
+        acc.set(n, a);
+      }
+    }
+    // Zero at the last ring, so the surface reaches full transparency exactly
+    // at the edge of the fade instead of being cut off part-way down.
+    const a255 = Math.round(255 * (1 - ring / FIELD_FADE_RINGS));
+    for (const [k, a] of acc) {
+      val.set(k, a[0] / a[1]);
+      alpha.set(k, a255);
+      next.push(k);
+    }
+    frontier = next;
+    if (a255 === 0) break;
+  }
+  return { val, alpha };
+}
+
+//: Web Mercator, so the texture matches the projection MapLibre stretches it
+//: into. Linear latitude would shear it — imperceptibly at 3 km, but this is
+//: three lines and removes the question.
+const mercX = lon => lon * Math.PI / 180;
+const mercY = lat => Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360));
+const lonOf = x => x * 180 / Math.PI;
+const latOf = y => (Math.atan(Math.exp(y)) - Math.PI / 4) * 360 / Math.PI;
+
+//: 256 RGB entries. Calling rampColour per pixel would parse hex strings a
+//: million times per update.
+function fieldLUT(mode) {
+  if (FIELD.lut && FIELD.lutMode === mode) return FIELD.lut;
+  const lut = new Uint8Array(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const c = hex2rgb(rampColour(mode, i / 255));
+    lut[i*3] = c[0]; lut[i*3+1] = c[1]; lut[i*3+2] = c[2];
+  }
+  FIELD.lutMode = mode;
+  return (FIELD.lut = lut);
+}
+
+//: null means "no measurement here": masked, or never measured. The caller
+//: fades alpha to zero at such a vertex rather than trusting a value for it.
+//: Treating null as a number would fabricate a travel time, and treating it as
+//: zero would paint the river with the fastest colour in the ramp.
+function fieldValue(p, mode, cfg) {
+  if (!p || p.masked) return null;
+  // `normalise` is affine in the underlying seconds for this mode and does not
+  // clamp, so interpolating the normalised value is identical to interpolating
+  // seconds and normalising afterwards. Clamping happens once, at the LUT.
+  const v = normalise(mode, p, cfg);
+  return (v == null || !isFinite(v)) ? null : v;
+}
+
+//: Cell ids are "h:q:r", and the centre of a regular hexagon is the mean of
+//: its vertices — so the mesh needs nothing the renderer is not already sent.
+function buildFieldMesh(fc) {
+  const cell = new Map();
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const f of fc.features) {
+    const m = /^h:(-?\d+):(-?\d+)$/.exec(f.id ?? (f.properties && f.properties.id) ?? '');
+    if (!m) continue;
+    const ring = f.geometry.coordinates[0];
+    const n = ring.length - 1;              // the ring repeats its first point
+    let lon = 0, lat = 0;
+    for (let k = 0; k < n; k++) { lon += ring[k][0]; lat += ring[k][1]; }
+    const x = mercX(lon / n), y = mercY(lat / n);
+    const k = m[1] + ',' + m[2];
+    cell.set(k, { k, x, y, p: f.properties });
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  const tris = [];
+  for (const key of cell.keys()) {
+    const c = key.split(','), q = +c[0], r = +c[1];
+    const a = cell.get((q+1) + ',' + r);
+    const b = cell.get(q + ',' + (r+1));
+    const d = cell.get((q+1) + ',' + (r-1));
+    const o = cell.get(key);
+    if (a && b) tris.push([o, a, b]);
+    if (d && a) tris.push([o, d, a]);
+  }
+  return { cell, tris, x0, x1, y0, y1 };
+}
+
+function renderField(fc, mode, cfg) {
+  const t0 = performance.now();
+  const mesh = buildFieldMesh(fc);
+  const spanX = mesh.x1 - mesh.x0, spanY = mesh.y1 - mesh.y0;
+  if (!mesh.tris.length || !(spanX > 0) || !(spanY > 0)) return null;
+
+  const W = FIELD_PX, H = Math.max(1, Math.round(W * spanY / spanX));
+  const buf = new Uint8ClampedArray(W * H * 4);      // zeroed = transparent
+  const sx = (W - 1) / spanX, sy = (H - 1) / spanY;
+  const lut = fieldLUT(mode);
+  let drawn = 0, held = 0, feathered = 0;
+
+  // Shade one triangle from per-vertex (value, opacity) pairs.
+  const shade = (v, vals, alphas) => {
+    const ax = (v[0].x - mesh.x0) * sx, ay = (mesh.y1 - v[0].y) * sy;
+    const bx = (v[1].x - mesh.x0) * sx, by = (mesh.y1 - v[1].y) * sy;
+    const cx = (v[2].x - mesh.x0) * sx, cy = (mesh.y1 - v[2].y) * sy;
+    const det = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+    if (det === 0) return false;
+    const va = vals[0], vb = vals[1], vc = vals[2];
+    const aa = alphas[0], ab = alphas[1], ac = alphas[2];
+    const xlo = Math.max(0, Math.floor(Math.min(ax, bx, cx)));
+    const xhi = Math.min(W - 1, Math.ceil(Math.max(ax, bx, cx)));
+    const ylo = Math.max(0, Math.floor(Math.min(ay, by, cy)));
+    const yhi = Math.min(H - 1, Math.ceil(Math.max(ay, by, cy)));
+    for (let y = ylo; y <= yhi; y++) {
+      for (let x = xlo; x <= xhi; x++) {
+        const w0 = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / det;
+        const w1 = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / det;
+        const w2 = 1 - w0 - w1;
+        // Tolerance rather than an exact >= 0 test: adjacent triangles share
+        // an edge, and dropping the pixels exactly on it leaves a lattice of
+        // transparent seams — the hex grid back again, in negative.
+        if (w0 < -1e-9 || w1 < -1e-9 || w2 < -1e-9) continue;
+        const alpha = w0 * aa + w1 * ab + w2 * ac;
+        if (alpha < 0.5) continue;
+        const o = (y * W + x) * 4;
+        // Never dilute a pixel that already has more confident coverage. Two
+        // triangles meet only along a shared edge, but that edge is where a
+        // feathered one abuts a measured one.
+        if (buf[o+3] >= alpha) continue;
+        const val = w0 * va + w1 * vb + w2 * vc;
+        const q = val <= 0 ? 0 : val >= 1 ? 255 : (val * 255) | 0;
+        const L = q * 3;
+        buf[o] = lut[L]; buf[o+1] = lut[L+1]; buf[o+2] = lut[L+2];
+        buf[o+3] = alpha;
+      }
+    }
+    return true;
+  };
+
+  const surf = fieldSurface(mesh, mode, cfg);
+  // Classify, then draw the faded triangles before the fully measured ones, so
+  // the measured side of a shared edge always wins the pixels on it.
+  const full = [], fade = [];
+  for (const v of mesh.tris) {
+    const k = [v[0].k, v[1].k, v[2].k];
+    if (!surf.val.has(k[0]) && !surf.val.has(k[1]) && !surf.val.has(k[2])) {
+      held++;                 // past the fade entirely: open water, left alone
+      continue;
+    }
+    const vals = k.map(x => surf.val.has(x) ? surf.val.get(x) : 0);
+    const alphas = k.map(x => surf.alpha.get(x) || 0);
+    (alphas[0] === 255 && alphas[1] === 255 && alphas[2] === 255
+      ? full : fade).push([v, vals, alphas]);
+  }
+  for (const t of fade) { if (shade(t[0], t[1], t[2])) feathered++; }
+  for (const t of full) { if (shade(t[0], t[1], t[2])) drawn++; }
+
+  const cv = FIELD.canvas || (FIELD.canvas = document.createElement('canvas'));
+  cv.width = W; cv.height = H;
+  cv.getContext('2d').putImageData(new ImageData(buf, W, H), 0, 0);
+  return {
+    url: cv.toDataURL('image/png'),
+    // Corner order is top-left, top-right, bottom-right, bottom-left.
+    coordinates: [[lonOf(mesh.x0), latOf(mesh.y1)], [lonOf(mesh.x1), latOf(mesh.y1)],
+                  [lonOf(mesh.x1), latOf(mesh.y0)], [lonOf(mesh.x0), latOf(mesh.y0)]],
+    drawn, held, feathered, W, H, ms: Math.round(performance.now() - t0),
+  };
+}
+
+//: In-page equivalent of verify.py: does the render still agree with the data?
+//:
+//: A cell centre is a mesh vertex, so barycentric interpolation there must
+//: return that cell's own measurement. Sampling the texture at every centre and
+//: comparing turns "the blend is faithful" into something checkable rather than
+//: asserted. Run `verifyField()` from the console.
+//:
+//: `exactPct` below 100 is pixel rounding, not drift: a centre lands up to half
+//: a texel from the exact vertex.
+//:
+//: Unreachable cells are no longer holes — the field diffuses into them — so
+//: the invariant is opacity, not emptiness: no cell without a measurement may
+//: ever be drawn at full opacity. `holesAtFullAlpha` must be 0, and
+//: `worstHoleAlpha` shows the ceiling the fade actually reached.
+function verifyField() {
+  if (!S.last || !FIELD.canvas) return { error: 'render the field first' };
+  const cfg = S.cfg.render, mode = S.mode;
+  const mesh = buildFieldMesh(S.last);
+  const spanX = mesh.x1 - mesh.x0, spanY = mesh.y1 - mesh.y0;
+  const W = FIELD.canvas.width, H = FIELD.canvas.height;
+  const px = FIELD.canvas.getContext('2d').getImageData(0, 0, W, H).data;
+  const sx = (W - 1) / spanX, sy = (H - 1) / spanY;
+  const lut = fieldLUT(mode);
+  let checked = 0, exact = 0, worst = 0, holes = 0, painted = 0, edge = 0, worstHole = 0;
+  for (const f of S.last.features) {
+    const m = /^h:(-?\d+):(-?\d+)$/.exec(f.id); if (!m) continue;
+    const ring = f.geometry.coordinates[0], n = ring.length - 1;
+    let lon = 0, lat = 0;
+    for (let k = 0; k < n; k++) { lon += ring[k][0]; lat += ring[k][1]; }
+    const X = Math.round((mercX(lon / n) - mesh.x0) * sx);
+    const Y = Math.round((mesh.y1 - mercY(lat / n)) * sy);
+    if (X < 0 || Y < 0 || X >= W || Y >= H) continue;
+    const o = (Y * W + X) * 4;
+    const v = fieldValue(f.properties, mode, cfg);
+    if (v === null) {
+      holes++;
+      if (px[o+3] > worstHole) worstHole = px[o+3];
+      // Reduced opacity is the point; full opacity would pass for measured.
+      if (px[o+3] >= 250) painted++;
+      continue;
+    }
+    if (px[o+3] === 0) { edge++; continue; }   // rim cell with no whole triangle
+    const q = v <= 0 ? 0 : v >= 1 ? 255 : (v * 255) | 0;
+    const d = Math.max(Math.abs(px[o] - lut[q*3]), Math.abs(px[o+1] - lut[q*3+1]),
+                       Math.abs(px[o+2] - lut[q*3+2]));
+    checked++; if (d === 0) exact++; if (d > worst) worst = d;
+  }
+  return { mode, cellsChecked: checked, exactMatch: exact,
+           exactPct: +(100 * exact / Math.max(1, checked)).toFixed(2),
+           worstChannelDelta: worst,
+           unreachableCells: holes, worstHoleAlpha: worstHole,
+           holesAtFullAlpha: painted, rimCellsUnfilled: edge,
+           fadeRings: FIELD_FADE_RINGS,
+           trianglesMeasured: FIELD.stats && FIELD.stats.drawn,
+           trianglesFeathered: FIELD.stats && FIELD.stats.feathered,
+           trianglesDropped: FIELD.stats && FIELD.stats.held,
+           rasterMs: FIELD.stats && FIELD.stats.ms };
+}
+
+//: Only travel time for now. The diverging ramps used by the other modes make
+//: the scalar-vs-colour distinction above load-bearing in ways worth verifying
+//: separately, and `cliff` uses null to mean "no cliff in the window" — real
+//: information, not a missing value, and not something to interpolate through.
+const fieldEnabled = () => S.smooth && S.mode === 'absolute';
+
+//: Bursts are real: a mode switch or a surface toggle can land in the same tick
+//: as a poll. Each `updateImage` aborts the previous in-flight load, and the
+//: AbortError that produces is surfaced as "map error" in the UI — alarming,
+//: and about nothing, since the aborted load was superseded on purpose.
+//: Collapsing a burst into one update removes the cause rather than the symptom.
+const FIELD_COALESCE_MS = 150;
+
+function updateField(fc) {
+  // Visibility flips immediately; only the raster rebuild is debounced, so the
+  // Field/Cells toggle stays instant.
+  applyFieldVisibility();
+  clearTimeout(FIELD.timer);
+  FIELD.timer = setTimeout(() => updateFieldNow(fc), FIELD_COALESCE_MS);
+}
+
+function applyFieldVisibility() {
+  if (!S.map || !S.map.getLayer('field')) return;
+  const on = fieldEnabled();
+  S.map.setLayoutProperty('field', 'visibility', on ? 'visible' : 'none');
+  // Every hexagon goes, the masked ones included. Drawing them — as a grey
+  // wash, a dashed outline, or a hole onto the basemap — puts a hard hexagonal
+  // edge back into a surface whose entire purpose is not having one. The field
+  // fades into those regions instead.
+  for (const id of ['cells-fill', 'cells-line', 'cells-line-masked']) {
+    if (S.map.getLayer(id))
+      S.map.setLayoutProperty(id, 'visibility', on ? 'none' : 'visible');
+  }
+  // The dashed-hexagon key describes a thing the field does not draw.
+  const kx = document.getElementById('key-excluded');
+  const kf = document.getElementById('key-faded');
+  if (kx) kx.hidden = on;
+  if (kf) kf.hidden = !on;
+}
+
+function updateFieldNow(fc) {
+  if (!S.map || !S.map.getLayer('field')) return;
+  applyFieldVisibility();
+  if (!fieldEnabled() || !fc) return;
+  const out = renderField(fc, S.mode, S.cfg.render);
+  if (!out) return;
+  S.map.getSource('field').updateImage({ url: out.url, coordinates: out.coordinates });
+  FIELD.stats = out;
+}
+
+function paintFeatures(fc) {
+  const cfg = S.cfg.render;
+  for (const f of fc.features) {
+    const p = f.properties;
+    p._color = p.masked ? '#5b6670' : rampColour(S.mode, normalise(S.mode, p, cfg));
+    p.masked = !!p.masked;                    // MapLibre 'case' needs a real boolean
+  }
+  return fc;
+}
+function probePoints(fc) {
+  const cells = fc.features.filter(f => !f.properties.masked);
+  const direct = cells.filter(f => f.properties.direct);
+  // When nearly everything was measured directly there is nothing to
+  // distinguish, and 1,500 identical dots are just noise over the field.
+  // RAPTOR measures every cell, so this empties the layer entirely.
+  if (!cells.length || direct.length / cells.length > 0.9) {
+    return { type: 'FeatureCollection', features: [] };
+  }
+  return {
+    type: 'FeatureCollection',
+    features: direct.map(f => ({
+      type: 'Feature',
+      properties: { id: f.properties.id },
+      geometry: { type: 'Point', coordinates: [f.properties.lon, f.properties.lat] },
+    })),
+  };
+}
+
+const ROUTE_COLORS = {};
+
+/* ------------------------------------------------------------------ *
+ * Vehicle playback.
+ *
+ * The server sends, per vehicle, the stretch of route polyline between its
+ * two most recent fixes plus the timestamps bracketing it. The browser plays
+ * that back on a fixed delay, so it is always interpolating between two known
+ * positions — never extrapolating past the newest one, which is what would
+ * otherwise require a visible correction when the truth arrives.
+ *
+ * Interpolation is by arc length along the supplied path, not by point index.
+ * Polyline points are unevenly spaced, so stepping through them at a constant
+ * rate would make a vehicle speed up and slow down around every bend.
+ * ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ *
+ * Vehicle playback — a per-vehicle leg queue.
+ *
+ * The server publishes an ordered list of immutable legs, each with a path
+ * and the real duration between the two fixes that bound it. The browser owns
+ * playback: it plays the current leg over that duration, then takes the next
+ * from the queue, and halts at the end of the last one until something new
+ * arrives.
+ *
+ * No wall-clock playhead and no buffer. The vehicle is simply one fix behind,
+ * which is the most that can be known without guessing. Published data can
+ * only ever append to the queue, so nothing that arrives can move a vehicle
+ * that is midway through a leg — which is what produced the bouncing.
+ * ------------------------------------------------------------------ */
+const VEH = { state: new Map(), raf: null, lastFrame: 0, meta: {} };
+
+//: A memory bound only. Dropping a queued leg *is* the teleport — `shift()`
+//: skips its entire span, and a leg can be 400 m — so the queue is never
+//: trimmed to control lag. Lag is controlled by playback rate instead, below.
+//: Measured at 15 Hz over 187 s, a tight cap produced 591 frames above
+//: 45 m/s, the worst a 664 m jump in a single frame.
+const MAX_QUEUE = 20;
+
+//: How far behind live playback aims to sit, in seconds of unplayed leg.
+//: Legs cannot be played before they exist, and they arrive with durations up
+//: to ~55 s — a 54 s leg delivered 5 s after the previous one leaves playback
+//: 49 s behind through no fault of its own. Anything tighter than one fix
+//: interval is unmeetable, so this is deliberately generous.
+const TARGET_LAG_S = 75;
+
+//: Ceiling on the catch-up rate. A vehicle drains a backlog by moving somewhat
+//: faster than it really did, which is a far smaller lie than skipping 400 m
+//: of track, but it is still a lie — keep it subtle.
+const MAX_CATCHUP = 2.5;
+
+function legLength(path) {
+  const k = Math.cos(path[0][1] * Math.PI / 180);
+  let cum = [0];
+  for (let i = 1; i < path.length; i++) {
+    cum.push(cum[i-1] + Math.hypot((path[i][0] - path[i-1][0]) * k,
+                                   path[i][1] - path[i-1][1]));
+  }
+  return cum;
+}
+
+function pointAlong(leg, frac) {
+  const cum = leg._cum || (leg._cum = legLength(leg.path));
+  const total = cum[cum.length - 1];
+  if (!(total > 0)) return leg.path[leg.path.length - 1];
+  const target = Math.max(0, Math.min(1, frac)) * total;
+  let i = 1;
+  while (i < cum.length - 1 && cum[i] < target) i++;
+  const span = cum[i] - cum[i-1] || 1;
+  const f = (target - cum[i-1]) / span;
+  const a = leg.path[i-1], b = leg.path[i];
+  return [a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1])];
+}
+
+function ingestVehicles(fc) {
+  const seen = new Set();
+  for (const f of fc.features) {
+    const id = f.id;
+    seen.add(id);
+    let st = VEH.state.get(id);
+    if (!st) {
+      st = { queue: [], cur: null, elapsed: 0, pos: null, props: f.properties,
+             lastId: null, missing: 0 };
+      VEH.state.set(id, st);
+    }
+    // Seed from the feature's own position. A vehicle has no legs until its
+    // second fix, and playback alone left `pos` null until then — so every
+    // vehicle was invisible for its first poll, and the whole fleet was
+    // missing for the first poll after a page load.
+    if (!st.pos && f.geometry) st.pos = f.geometry.coordinates;
+    st.props = f.properties;
+    st.missing = 0;
+    const fresh = f.legs || [];
+    if (st.lastId === null) {
+      // First sight of this vehicle. The server keeps its last six legs, and
+      // queueing all of them starts the marker up to two minutes in the past
+      // — legs then arrive as fast as they are played, so it never catches up,
+      // and it stays minutes behind for as long as the page is open.
+      // Measured on a fresh load: queue depths of 4-5 across the fleet.
+      //
+      // Take only the newest. "One fix behind" is the whole design; adopting
+      // the backlog quietly made it six.
+      if (fresh.length) {
+        st.queue.push(fresh[fresh.length - 1]);
+        st.lastId = fresh[fresh.length - 1].id;
+      }
+    } else {
+      for (const leg of fresh) {
+        // Append only legs never queued before. Anything already played, or
+        // already waiting, is left exactly as it was.
+        if (leg.id > st.lastId) {
+          st.queue.push(leg);
+          st.lastId = leg.id;
+        }
+      }
+    }
+    while (st.queue.length > MAX_QUEUE) st.queue.shift();
+    if (!st.cur && st.queue.length) { st.cur = st.queue.shift(); st.elapsed = 0; }
+    if (!st.pos && st.cur) st.pos = st.cur.path[0];
+  }
+  // A vehicle absent for a single poll must not lose its state. Doing so
+  // discards `lastId`, and every leg then looks new — the vehicle rewinds and
+  // replays legs it has already run. Tolerate a few misses before forgetting.
+  for (const [id, st] of VEH.state) {
+    if (seen.has(id)) continue;
+    st.missing = (st.missing || 0) + 1;
+    if (st.missing > 6) VEH.state.delete(id);
+  }
+  VEH.meta = fc.metadata || {};
+}
+
+function playVehicles(ts) {
+  VEH.raf = requestAnimationFrame(playVehicles);
+  if (!S.map || !S.map.getSource('vehicles')) return;
+  // Cap the step so a backgrounded tab does not fast-forward every vehicle
+  // through its whole queue in one frame.
+  const dt = Math.min(0.25, VEH.lastFrame ? (ts - VEH.lastFrame) / 1000 : 0);
+  VEH.lastFrame = ts;
+
+  const feats = [];
+  for (const [id, st] of VEH.state) {
+    if (st.cur) {
+      // Unplayed seconds still in hand. Beyond the target, play faster so the
+      // backlog drains smoothly rather than being dropped as a jump. Bursty
+      // feed timestamps make some backlog unavoidable; a teleport is not.
+      let backlog = st.cur.dur - st.elapsed;
+      for (const l of st.queue) backlog += l.dur;
+      const rate = backlog > TARGET_LAG_S
+        ? Math.min(MAX_CATCHUP, 1 + (backlog - TARGET_LAG_S) / TARGET_LAG_S)
+        : 1;
+      st.elapsed += dt * rate;
+      while (st.cur && st.elapsed >= st.cur.dur) {
+        st.pos = st.cur.path[st.cur.path.length - 1];
+        st.elapsed -= st.cur.dur;
+        st.cur = st.queue.shift() || null;
+        if (!st.cur) st.elapsed = 0;   // halt at the last known point
+      }
+      if (st.cur) st.pos = pointAlong(st.cur, st.elapsed / st.cur.dur);
+    }
+    if (!st.pos) continue;
+    feats.push({
+      type: 'Feature', id,
+      properties: { ...st.props, _color: st.props._color,
+                    // Halted: nothing left to play. Honest, not a fault.
+                    _stalled: !st.cur },
+      geometry: { type: 'Point', coordinates: st.pos },
+    });
+  }
+  S.map.getSource('vehicles').setData({ type: 'FeatureCollection', features: feats });
+}
+
+function colourVehicles(fc) {
+  for (const f of fc.features) {
+    f.properties._color = ROUTE_COLORS[f.properties.route_id] || '#9aa7b2';
+  }
+  ingestVehicles(fc);
+  if (!VEH.raf) VEH.raf = requestAnimationFrame(playVehicles);
+  return fc;
+}
+
+async function loadRoutes() {
+  if (!S.map || !S.map.getSource('routes')) return;
+  try {
+    const fc = await (await fetch('/api/routes.geojson')).json();
+    for (const f of fc.features) ROUTE_COLORS[f.properties.route_id] = f.properties.color;
+    S.map.getSource('routes').setData(fc);
+    S.routeCount = (fc.metadata || {}).routes || fc.features.length;
+  } catch (err) { /* overlay is optional; the map works without it */ }
+}
+
+async function loadStations() {
+  if (!S.map || !S.map.getSource('stations')) return;
+  try {
+    const fc = await (await fetch('/api/stations.geojson')).json();
+    S.map.getSource('stations').setData(fc);
+    S.stationCount = (fc.metadata || {}).stations ?? fc.features.length;
+  } catch (err) { /* optional overlay */ }
+}
+
+async function loadVehicles() {
+  if (!S.map || !S.map.getSource('vehicles')) return;
+  try {
+    const fc = await (await fetch('/api/vehicles.geojson')).json();
+    colourVehicles(fc);
+    S.vehicleMeta = fc.metadata || {};
+  } catch (err) { /* leave the last positions in place */ }
+}
+
+function fitToCells(fc) {
+  const b = new maplibregl.LngLatBounds();
+  for (const f of fc.features) for (const c of f.geometry.coordinates[0]) b.extend(c);
+  S.map.fitBounds(b, { padding: 48, duration: 0 });
+}
+
+async function refresh(first) {
+  try {
+    if (!S.cfg) {
+      S.cfg = await (await fetch('/api/config')).json();
+      S.poll = (S.cfg.render.poll_seconds || 20) * 1000;
+      document.getElementById('title').textContent = S.cfg.origin.label || 'Travel time field';
+    }
+    const fc = await (await fetch('/api/geojson')).json();
+    S.last = fc;
+    document.getElementById('subtitle').textContent =
+      `${S.cfg.grid.cells} cells · ${S.cfg.grid.cell_km} km · ${S.cfg.provider.name}`;
+    if (S.map && S.map.getSource && S.map.getSource('cells')) {
+      S.map.getSource('cells').setData(paintFeatures(fc));
+      updateField(fc);
+      const probes = probePoints(fc);
+      S.map.getSource('probes').setData(probes);
+      const km = document.getElementById('key-measured');
+      if (km) km.hidden = probes.features.length === 0;
+      for (const o of OVERLAYS) {
+        if (!o._src) continue;
+        const data = await (await fetch(o.url)).json();
+        if (o.colour) for (const f of data.features) f.properties._color = o.colour(f, S.mode, S.cfg.render);
+        S.map.getSource(o.id).setData(data);
+      }
+    }
+    if (first && S.map && fc.features.length) fitToCells(fc);
+    paintRail(fc);
+  } catch (err) {
+    document.getElementById('subtitle').textContent = 'server unreachable — retrying';
+  }
+}
+
+function paintRail(fc) {
+  const meta = (fc && fc.metadata) || {};
+  const notes = meta.notes || {};
+  const rep = notes.cycle_report || {}, bud = notes.budget || {}, rec = notes.reconstructor || {};
+  const set = (id, v) => document.getElementById(id).textContent = v;
+  set('s-cycle', rep.cycle ?? '—');
+  set('s-spent', rep.elements_spent ?? '—');
+  set('s-meas', rep.cells_measured ?? '—');
+  set('s-masked', rep.cells_masked ?? '—');
+  set('s-mae', rep.holdout_mae_s == null ? '—' : (rep.holdout_mae_s/60).toFixed(2) + ' min');
+  set('r-type', rec.type ?? '—');
+  set('r-cells', rec.modelled_cells ?? '—');
+  const evr = rec.explained_variance_ratio;
+  set('r-evr', evr && evr.length ? (evr.reduce((a,b)=>a+b,0)*100).toFixed(0) + '%' : '—');
+  set('r-tiles', (S.cfg.basemap && S.cfg.basemap.cached_tiles) ?? '—');
+  set('r-routes', S.routeCount ?? '—');
+  set('r-stations', S.stationCount ?? '—');
+  const vm = S.vehicleMeta || {};
+  set('r-vehicles', vm.count ?? '—');
+  set('r-vage', vm.median_age_s == null ? '—' : vm.median_age_s + ' s');
+  const tot = (vm.on_shape || 0) + (vm.off_shape || 0) + (vm.no_shape || 0);
+  set('r-vtrack', tot ? `${Math.round((vm.on_shape || 0) / tot * 100)}%` : '—');
+  // `held` is the deadband absorbing a bad re-match or a stationary car's
+  // noise; `reshape` is the tracker giving up on a branch it guessed wrong.
+  // Both should stay near zero — `reshape` climbing means shape resolution is
+  // picking the wrong geometry, which shows up as vehicles off their track.
+  set('r-vheld', `${vm.held ?? 0} / ${vm.reshape ?? 0}`);
+  // Fully measured triangles, then those fading out into unreachable ground.
+  set('r-field', FIELD.stats && fieldEnabled()
+    ? `${FIELD.stats.drawn} tri · ${FIELD.stats.feathered} faded · ${FIELD.stats.ms} ms`
+    : '—');
+
+  const feats = (fc && fc.features) || [];
+  const tr = feats.filter(f => f.properties.spread_s != null).map(f => f.properties);
+  document.getElementById('transit-block').hidden = tr.length === 0;
+  document.getElementById('m-spread').hidden = tr.length === 0;
+  document.getElementById('m-cliff').hidden = !feats.some(f => f.properties.next_jump_s != null);
+  if (tr.length) {
+    const med = a => { const s = a.filter(v => v != null).sort((x,y)=>x-y);
+                       return s.length ? s[Math.floor(s.length/2)] : null; };
+    const wins = tr.filter(p => p.delta_s != null && p.delta_s < 0).length;
+    set('t-wins', `${wins}/${tr.length}`);
+    set('t-spread', (med(tr.map(p=>p.spread_s))/60).toFixed(1) + ' min');
+    set('t-wait', (med(tr.map(p=>p.wait_s))/60).toFixed(1) + ' min');
+    set('t-xfer', String(med(tr.map(p=>p.transfers)) ?? '—'));
+    const cl = tr.map(p=>p.next_jump_s).filter(v=>v!=null);
+    set('t-cliff', cl.length ? (med(cl)/60).toFixed(0) + ' min' : 'none');
+  }
+
+  const provs = bud.providers || {};
+  // The routing meter, not the tile meter — tiles have their own allowance.
+  const key = Object.keys(provs).find(k => !k.endsWith('_tiles') && provs[k].spent > 0)
+           || Object.keys(provs).find(k => !k.endsWith('_tiles'));
+  if (key) {
+    const p = provs[key];
+    const used = p.spent / Math.max(1, p.effective_quota);
+    document.getElementById('meter-fill').style.width = (used*100).toFixed(1) + '%';
+    set('meter-left', Math.round(p.remaining).toLocaleString() + ' left');
+    set('meter-pct', (used*100).toFixed(1) + '% used');
+    if (bud.period_ends) {
+      const end = new Date(bud.period_ends);
+      const start = new Date(end.getTime() - 86400000);
+      const frac = Math.min(1, Math.max(0, (Date.now() - start) / (end - start)));
+      document.getElementById('meter-target').style.left = (frac*100).toFixed(1) + '%';
+      document.getElementById('warn').textContent = rep.budget_stalled
+        ? 'quota exhausted — frozen until reset'
+        : used > frac + 0.05 ? 'ahead of pace' : '';
+    }
+  }
+}
+
+function paintRamp() {
+  const r = document.getElementById('ramp');
+  r.innerHTML = '';
+  for (let i = 0; i < 32; i++) {
+    const s = document.createElement('span');
+    s.style.background = rampColour(S.mode, i/31);
+    r.appendChild(s);
+  }
+  const cfg = S.cfg.render;
+  const lo = document.getElementById('ramp-lo'), hi = document.getElementById('ramp-hi');
+  if (S.mode === 'spread') {
+    lo.textContent = '0 min'; hi.textContent = (cfg.spread_max_minutes || 20) + '+ min';
+  } else if (S.mode === 'cliff') {
+    lo.textContent = 'go now'; hi.textContent = (cfg.cliff_max_minutes || 15) + '+ min';
+  } else if (S.mode === 'delta') {
+    lo.textContent = cfg.delta_range_minutes[0] + ' min';
+    hi.textContent = '+' + cfg.delta_range_minutes[1] + ' min';
+  } else {
+    lo.textContent = (cfg.absolute_min_minutes || 0) + ' min';
+    hi.textContent = cfg.absolute_max_minutes + '+ min';
+  }
+}
+
+function buildMap() {
+  S.map = new maplibregl.Map({
+    container: 'map', style: styleSpec(),
+    center: [S.cfg.origin.lon, S.cfg.origin.lat],
+    zoom: S.cfg.render.initial_zoom || 15,
+    attributionControl: false,
+  });
+  S.map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
+  S.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+  // Surface style/tile errors in the UI. Silent failure is what made the last
+  // blank map hard to diagnose.
+  S.map.on('error', e => {
+    const err = e && e.error;
+    const msg = (err && err.message) || 'unknown map error';
+    // An aborted load was cancelled because something newer replaced it —
+    // which is the intended behaviour, not a fault. Reporting it as a map
+    // error sends people hunting for a problem that does not exist.
+    if ((err && err.name === 'AbortError') || /aborted/i.test(msg)) {
+      console.debug('[isogrid] superseded load:', msg);
+      return;
+    }
+    document.getElementById('tip').textContent = 'map error: ' + msg;
+    console.error('[isogrid]', err);
+  });
+  S.map.on('load', () => {
+    for (const o of OVERLAYS) {
+      S.map.addSource(o.id, { type: 'geojson', data: { type:'FeatureCollection', features: [] } });
+      for (const l of o.layers) S.map.addLayer({ ...l, source: o.id }, o.before);
+      o._src = true;
+    }
+    refresh(true);
+    loadRoutes();
+    loadStations();
+    loadVehicles();
+    // Vehicles move continuously; the surface does not. Poll them faster.
+    setInterval(loadVehicles, (S.cfg.render.overlays &&
+                               S.cfg.render.overlays.vehicles_min_refresh_s || 10) * 1000);
+  });
+  const mins = v => v == null ? '—' : (v/60).toFixed(1) + ' min';
+  S.map.on('mousemove', 'stations-dot', e => {
+    const p = e.features[0].properties;
+    document.getElementById('tip').textContent =
+      `${p.name}${p.routes ? ' · ' + p.routes : ''}`;
+  });
+  S.map.on('mousemove', 'vehicles-dot', e => {
+    const p = e.features[0].properties;
+    const mph = p.speed_ms == null ? null : (p.speed_ms * 2.237).toFixed(0);
+    document.getElementById('tip').textContent =
+      `${p.route_id || 'vehicle'} ${p.label || p.id}` +
+      (mph ? ` · ${mph} mph` : '') +
+      (p.status ? ` · ${p.status.replace('_', ' ')}` : '') +
+      (p.occupancy ? ` · ${p.occupancy.replace(/_/g, ' ')}` : '') +
+      (p.age_s != null ? ` · ${p.age_s}s ago` : '') +
+      (p.on_track === false ? ' · off route (straight line)' : '');
+  });
+  S.map.on('mousemove', 'cells-fill', e => {
+    S.map.getCanvas().style.cursor = 'pointer';
+    const p = e.features[0].properties;
+    let msg;
+    if (p.masked) {
+      msg = `${p.id} · excluded (${p.mask_reason || 'no route'})`;
+    } else if (p.spread_s != null) {
+      const better = p.delta_s != null && p.delta_s < 0;
+      msg = `${p.id} · transit ${mins(p.live_s)} (${mins(p.p10_s)}–${mins(p.p90_s)}) · `
+          + `walk ${mins(p.baseline_s)} · ${better ? 'transit wins by' : 'walking wins by'} `
+          + `${Math.abs((p.delta_s || 0)/60).toFixed(1)} min · `
+          + (p.next_jump_s != null
+              ? `leave within ${(p.next_jump_s/60).toFixed(0)} min or it jumps`
+              : 'no cliff in window');
+    } else {
+      msg = `${p.id} · live ${mins(p.live_s)} · free-flow ${mins(p.baseline_s)} · `
+          + `delay ${p.delta_s == null ? '—' : (p.delta_s/60).toFixed(1)+' min'} · `
+          + (p.direct ? 'measured' : 'reconstructed');
+    }
+    document.getElementById('tip').textContent = msg;
+  });
+  S.map.on('mouseleave', 'cells-fill', () => {
+    S.map.getCanvas().style.cursor = '';
+    document.getElementById('tip').textContent = 'Hover a cell for detail.';
+  });
+}
+
+function rebuildStyle() {
+  S.map.setStyle(styleSpec());
+  S.map.once('styledata', () => {
+    for (const o of OVERLAYS) {
+      if (S.map.getSource(o.id)) continue;
+      S.map.addSource(o.id, { type:'geojson', data:{ type:'FeatureCollection', features: [] } });
+      for (const l of o.layers) S.map.addLayer({ ...l, source: o.id }, o.before);
+    }
+    if (S.last) {
+      S.map.getSource('cells').setData(paintFeatures(S.last));
+      S.map.getSource('probes').setData(probePoints(S.last));
+      // setStyle rebuilt every layer, so the field texture is gone with them.
+      updateField(S.last);
+    }
+    loadRoutes();
+    loadStations();
+    loadVehicles();
+  });
+}
+
+function setMode(mode) {
+  S.mode = mode;
+  for (const [id, m] of [['m-delta','delta'], ['m-abs','absolute'],
+                         ['m-spread','spread'], ['m-cliff','cliff']]) {
+    document.getElementById(id).setAttribute('aria-pressed', String(mode === m));
+  }
+  paintRamp();
+  if (S.last && S.map.getSource('cells')) S.map.getSource('cells').setData(paintFeatures(S.last));
+  updateField(S.last);
+}
+
+function setSurface(smooth) {
+  S.smooth = smooth;
+  document.getElementById('f-field').setAttribute('aria-pressed', String(smooth));
+  document.getElementById('f-cells').setAttribute('aria-pressed', String(!smooth));
+  updateField(S.last);
+}
+function setBasemap(style) {
+  S.basemap = style;
+  document.getElementById('b-night').setAttribute('aria-pressed', String(style === 'night'));
+  document.getElementById('b-main').setAttribute('aria-pressed', String(style === 'main'));
+  rebuildStyle();
+}
+document.getElementById('m-delta').onclick = () => setMode('delta');
+document.getElementById('m-abs').onclick = () => setMode('absolute');
+document.getElementById('m-spread').onclick = () => setMode('spread');
+document.getElementById('m-cliff').onclick = () => setMode('cliff');
+document.getElementById('f-field').onclick = () => setSurface(true);
+document.getElementById('f-cells').onclick = () => setSurface(false);
+document.getElementById('b-night').onclick = () => setBasemap('night');
+document.getElementById('b-main').onclick = () => setBasemap('main');
+document.getElementById('opacity').oninput = e => {
+  S.opacity = e.target.value / 100;
+  document.getElementById('op-val').textContent = e.target.value + '%';
+  if (S.map.getLayer('cells-fill')) {
+    S.map.setPaintProperty('cells-fill', 'fill-opacity', fillOpacity());
+    S.map.setPaintProperty('cells-line', 'line-opacity', fillOpacity());
+  }
+  if (S.map.getLayer('field')) S.map.setPaintProperty('field', 'raster-opacity', S.opacity);
+};
+
+fetch('/api/config').then(r => r.json()).then(cfg => {
+  S.cfg = cfg;
+  S.poll = (cfg.render.poll_seconds || 20) * 1000;
+  paintRamp();
+  if (typeof maplibregl === 'undefined') {
+    document.getElementById('tip').textContent =
+      'MapLibre failed to load from unpkg.com — check the network, or vendor it into web/';
+    document.getElementById('subtitle').textContent = 'renderer unavailable';
+  } else {
+    buildMap();
+  }
+  refresh(false);                      // rail populates even if the map fails
+  setInterval(() => refresh(false), S.poll);
+});
+</script>
+</body>
+</html>
