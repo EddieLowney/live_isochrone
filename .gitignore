@@ -2,6 +2,8 @@
 otp/*.jar
 otp/*.osm.pbf
 otp/*.gtfs.zip
+otp/*.gtfs.zip.prev
+otp/*.gtfs.zip.tmp
 otp/graph.obj
 
 # Derived state: the measurement store, budget ledger, and every cache the
@@ -20,3 +22,8 @@ venv/
 
 # Claude Code machine-local settings
 .claude/settings.local.json
+
+# R2 credentials. Never commit; see deploy/r2.env.example.
+.env
+*.env
+!deploy/*.env.example

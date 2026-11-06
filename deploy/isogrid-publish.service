@@ -1,0 +1,32 @@
+# systemd unit: run the publisher forever, restart it if it dies, start it at boot.
+#
+#   sudo cp deploy/isogrid-publish.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now isogrid-publish
+#   journalctl -u isogrid-publish -f          # follow the log
+#
+# Paths assume the repo is cloned to /home/ubuntu/live_isochrone (the default
+# user on Oracle's Ubuntu images). Edit User/WorkingDirectory if not.
+
+[Unit]
+Description=isogrid publisher (live isochrone -> Cloudflare R2)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/live_isochrone
+# KEY=value lines, as in deploy/r2.env.example. No `export`, no quotes needed.
+EnvironmentFile=/home/ubuntu/live_isochrone/.env
+# Without this, Python buffers stdout and the journal shows nothing for minutes.
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/live_isochrone/.venv/bin/python -m isogrid.cli --config config/mbta-raptor.yaml publish --r2
+# publish exits within ~2 s of SIGTERM; the margin covers a cycle mid-write.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

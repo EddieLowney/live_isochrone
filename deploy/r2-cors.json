@@ -1,0 +1,13 @@
+[
+  {
+    "AllowedOrigins": [
+      "https://eddielowney.github.io",
+      "http://localhost:8002",
+      "http://127.0.0.1:8002"
+    ],
+    "AllowedMethods": ["GET", "HEAD"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]

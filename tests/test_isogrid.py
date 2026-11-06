@@ -2434,6 +2434,234 @@ def test_trip_change_still_publishes_the_vehicle():
     assert segs[0]["legs"] == [], "but with no legs to replay"
 
 
+# -- static publishing ----------------------------------------------------
+
+from isogrid.publish import DirSink, FeedRefresher, Publisher, R2Sink  # noqa: E402
+
+
+def test_walk_layer_caches_are_keyed_by_feed_not_just_date():
+    """Keyed by service date alone, a restart after a new feed landed loaded
+    footpaths, access and egress arrays built against the previous feed's stop
+    list — indexed into the wrong stops, with nothing to say so."""
+    with tempfile.TemporaryDirectory() as d:
+        _, feed = _feed(d)
+        cache = os.path.join(d, "c")
+        o = Coord(42.3600, -71.0580)
+        g = HexGrid(o, cell_km=0.35, rings=2)
+        when = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
+
+        def start_and_cycle():
+            p = RaptorProvider(gtfs_path=feed, cache_dir=cache, realtime=False,
+                               access_walk_s=600)
+            p.fetch(o, p.plan(g.cells)[0], "transit", when)
+            return {f for f in os.listdir(cache)
+                    if f.startswith(("footpaths-", "access-", "egress-"))}
+
+        first = start_and_cycle()
+        os.utime(feed, (1_700_000_000, 1_700_000_000))   # new feed, same day
+        rebuilt = start_and_cycle() - first
+        assert {f.split("-")[0] for f in rebuilt} == {"footpaths", "access", "egress"}
+
+
+class _StubS3:
+    def __init__(self):
+        self.calls = []
+
+    def put_object(self, **kw):
+        self.calls.append(kw)
+
+
+def test_dir_sink_replaces_atomically_and_leaves_no_temp_file():
+    with tempfile.TemporaryDirectory() as d:
+        sink = DirSink(d)
+        sink.put("surface.json", b'{"a":1}', "application/json", "no-cache")
+        sink.put("surface.json", b'{"a":2}', "application/json", "no-cache")
+        assert pathlib.Path(d, "surface.json").read_bytes() == b'{"a":2}'
+        assert os.listdir(d) == ["surface.json"]
+
+
+def test_r2_sink_gzips_and_labels_the_encoding():
+    """A gzipped body without Content-Encoding reaches the page as binary, and
+    the JSON parse fails with nothing to say why."""
+    import gzip
+
+    s3 = _StubS3()
+    R2Sink("bkt", prefix="/live/", client=s3).put(
+        "surface.json", b'{"x":1}', "application/json", "no-cache")
+    call = s3.calls[0]
+    assert call["Bucket"] == "bkt" and call["Key"] == "live/surface.json"
+    assert call["ContentEncoding"] == "gzip" and call["CacheControl"] == "no-cache"
+    assert gzip.decompress(call["Body"]) == b'{"x":1}'
+
+
+def test_r2_gzip_is_deterministic_so_unchanged_files_keep_their_etag():
+    s3 = _StubS3()
+    sink = R2Sink("bkt", client=s3)
+    for _ in range(2):
+        sink.put("a.json", b"{}" * 100, "application/json", "x")
+    assert s3.calls[0]["Body"] == s3.calls[1]["Body"]
+
+
+def test_r2_from_env_names_missing_variables_without_echoing_values():
+    try:
+        R2Sink.from_env({"R2_ACCOUNT_ID": "acct-9", "R2_SECRET_ACCESS_KEY": "hunter2"})
+    except SystemExit as exc:
+        msg = str(exc)
+    else:
+        raise AssertionError("expected SystemExit")
+    assert "R2_ACCESS_KEY_ID" in msg and "R2_BUCKET" in msg
+    assert "hunter2" not in msg and "acct-9" not in msg
+
+
+class _Resp:
+    def __init__(self, body, headers=None):
+        self._body, self.headers = body, headers or {}
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _gtfs_zip(*extra):
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for n in ("stops.txt", "routes.txt", "trips.txt", "stop_times.txt", *extra):
+            z.writestr(n, "id\n1\n")
+    return buf.getvalue()
+
+
+def test_feed_refresh_never_replaces_a_working_feed_with_a_bad_download():
+    with tempfile.TemporaryDirectory() as d:
+        path = pathlib.Path(d, "feed.zip")
+        path.write_bytes(_gtfs_zip())
+        before = path.read_bytes()
+        f = FeedRefresher(path, opener=lambda req, timeout: _Resp(b"<html>503</html>"))
+        assert f.maybe_refresh(now=0) is False
+        assert path.read_bytes() == before
+        assert "not a zip" in f.last_error
+
+
+def test_feed_refresh_sends_if_modified_since_and_treats_304_as_unchanged():
+    import urllib.error
+
+    seen = {}
+
+    def opener(req, timeout):
+        seen.update(req.headers)
+        raise urllib.error.HTTPError(req.full_url, 304, "Not Modified", {}, None)
+
+    with tempfile.TemporaryDirectory() as d:
+        path = pathlib.Path(d, "feed.zip")
+        path.write_bytes(_gtfs_zip())
+        f = FeedRefresher(path, opener=opener)
+        assert f.maybe_refresh(now=0) is False and f.last_error is None
+        assert "If-modified-since" in seen
+
+
+def test_feed_refresh_installs_a_new_feed_keeps_the_old_and_stamps_its_date():
+    from email.utils import parsedate_to_datetime
+
+    new, modified = _gtfs_zip("calendar.txt"), "Sun, 01 Nov 2026 12:00:00 GMT"
+    with tempfile.TemporaryDirectory() as d:
+        path = pathlib.Path(d, "feed.zip")
+        path.write_bytes(_gtfs_zip())
+        old = path.read_bytes()
+        f = FeedRefresher(path, opener=lambda req, timeout:
+                          _Resp(new, {"Last-Modified": modified}))
+        assert f.maybe_refresh(now=0) is True
+        assert path.read_bytes() == new
+        assert pathlib.Path(d, "feed.zip.prev").read_bytes() == old
+        assert not pathlib.Path(d, "feed.zip.tmp").exists()
+        assert int(path.stat().st_mtime) == int(parsedate_to_datetime(modified).timestamp())
+        assert f.maybe_refresh(now=60) is False, "next check is hours away"
+
+
+class _FakeOverlays:
+    enabled = True
+
+    def routes_geojson(self):
+        return {"type": "FeatureCollection", "features": []}
+
+    stations_geojson = routes_geojson
+    vehicles_geojson = routes_geojson
+
+
+class _FakeEngine:
+    def __init__(self, cfg=None):
+        shared = cfg if cfg is not None else {}
+        self.c = type("C", (), {"describe": staticmethod(lambda: shared)})
+
+    def geojson(self):
+        return {"type": "FeatureCollection", "features": [],
+                "metadata": {"generated_at": "2026-11-05T00:00:00+00:00"}}
+
+
+def test_published_config_forces_the_keyless_basemap():
+    """A static host has no tile proxy: labels=true would send the deployed page
+    hunting for /tiles on github.io, and a TomTom key must never ship anyway."""
+    live = {"render": {"basemap": {"labels": True}}}
+    with tempfile.TemporaryDirectory() as d:
+        pub = Publisher(_FakeEngine(live), [DirSink(d)], overlays=_FakeOverlays())
+        assert pub.publish_static()
+        cfg = json.loads(pathlib.Path(d, "config.json").read_text())
+        assert cfg["render"]["basemap"]["labels"] is False
+        assert live["render"]["basemap"]["labels"] is True, "live config untouched"
+        # The page polls vehicles at the rate they are actually published.
+        assert cfg["render"]["overlays"]["vehicles_min_refresh_s"] == 10.0
+        assert sorted(os.listdir(d)) == ["config.json", "routes.json", "stations.json"]
+
+
+def test_one_failing_sink_does_not_starve_the_others():
+    class Broken:
+        def put(self, *a):
+            raise OSError("disk full")
+
+        def __str__(self):
+            return "broken"
+
+    with tempfile.TemporaryDirectory() as d:
+        pub = Publisher(_FakeEngine(), [Broken(), DirSink(d)], overlays=_FakeOverlays())
+        pub.publish_surface()
+        pub.publish_vehicles()
+        for name in ("surface.json", "status.json", "vehicles.json"):
+            assert pathlib.Path(d, name).is_file()
+        assert "disk full" in pub.errors["surface.json"]
+        assert pub.writes["surface.json"] == 0, "a partial write is not a success"
+
+
+def test_scheduler_hands_each_cycle_to_on_cycle():
+    from isogrid.server import CycleScheduler
+
+    class Report:
+        def as_dict(self):
+            return {"cycle": 7}
+
+    class Eng:
+        cfg = type("Cfg", (), {"cycle_seconds": 0.01})
+
+        def run_cycle(self):
+            return "surface", Report()
+
+    got = []
+    sched = CycleScheduler(Eng())
+
+    def hook(surface, report):
+        got.append((surface, report.as_dict()))
+        sched.stop()
+
+    sched.on_cycle = hook
+    sched._loop()
+    assert got == [("surface", {"cycle": 7})] and sched.last_error is None
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     failed = 0

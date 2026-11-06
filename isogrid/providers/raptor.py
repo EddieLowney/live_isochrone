@@ -108,6 +108,10 @@ class RaptorProvider(TravelTimeProvider):
         self._direct_cache: Optional[tuple] = None
         self._data = None
         self._service_date = None
+        #: mtime of the feed `_data` was parsed from. Part of every derived
+        #: cache key, because the stop list those arrays index into belongs to
+        #: one specific feed, not to a date.
+        self._feed_id: Optional[int] = None
         self._footpaths = None
         self._access: dict[int, int] = {}
         self._egress: Optional[EgressMatrix] = None
@@ -157,6 +161,10 @@ class RaptorProvider(TravelTimeProvider):
         The service day starts at 03:00 local, not midnight: a trip leaving at
         00:40 belongs to the previous day's schedule, and rolling at midnight
         would drop late-night service every night.
+
+        A feed replaced on disk is adopted at the next rollover, not mid-day.
+        Swapping schedules between two cycles would rebuild every walk layer at
+        an arbitrary moment; at 03:00 that happens anyway.
         """
         local = when.astimezone(self.tz)
         service_day = (local - timedelta(hours=3)).date()
@@ -170,13 +178,18 @@ class RaptorProvider(TravelTimeProvider):
         t0 = time.time()
         self._data = load_gtfs(self.gtfs_path, on=service_day, cache_dir=self.cache_dir)
         self._service_date = service_day
+        self._feed_id = int(Path(self.gtfs_path).stat().st_mtime)
         self._footpaths = None
         self._access = {}
         self.stats["gtfs_load_s"] = round(time.time() - t0, 2)
         self.stats["gtfs"] = self._data.describe()
 
     def _ensure_walk_layers(self, origin: Coord, cells: Sequence[Cell]):
-        tag = f"{self.walk_source_name}-{self._service_date}"
+        # The feed belongs in the key as much as the date does. Keyed by date
+        # alone, a restart after a new feed landed loaded footpaths, access and
+        # egress arrays built against the previous feed's stop list — indexed
+        # into the wrong stops, with nothing to say so.
+        tag = f"{self.walk_source_name}-{self._service_date}-f{self._feed_id}"
         if self._footpaths is None:
             self._footpaths = build_footpaths(
                 self._data, self.transfer_walk_s,

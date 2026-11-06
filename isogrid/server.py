@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlparse
 
 from .engine import Engine
@@ -135,9 +135,13 @@ class TileProxy:
 class CycleScheduler:
     """Runs `engine.run_cycle()` on a fixed cadence."""
 
-    def __init__(self, engine: Engine, interval_s: Optional[float] = None):
+    def __init__(self, engine: Engine, interval_s: Optional[float] = None,
+                 on_cycle: Optional[Callable] = None):
         self.engine = engine
         self.interval_s = float(interval_s or engine.cfg.cycle_seconds)
+        #: Called with (surface, report) after each successful cycle — how the
+        #: static publisher rides this loop instead of keeping its own clock.
+        self.on_cycle = on_cycle
         self.last_report: Optional[dict] = None
         self.last_error: Optional[str] = None
         self.overruns = 0
@@ -152,9 +156,11 @@ class CycleScheduler:
         while not self._stop.is_set():
             started = time.monotonic()
             try:
-                _surface, report = self.engine.run_cycle()
+                surface, report = self.engine.run_cycle()
                 self.last_report = report.as_dict()
                 self.last_error = None
+                if self.on_cycle is not None:
+                    self.on_cycle(surface, report)
             except BudgetExhausted as exc:
                 # Expected terminal state, not a crash. The surface stays live
                 # and simply ages.
@@ -206,6 +212,10 @@ class TransitOverlays:
         self.cfg = render.get("overlays", {}) or {}
         self.gtfs_path = getattr(prov, "gtfs_path", None)
         self.cache_dir = getattr(prov, "cache_dir", "data/raptor")
+        #: Feed identity for the caches below. Keyed by origin alone, a refreshed
+        #: feed would keep serving the old routes and the old trip-to-shape map.
+        self.feed_tag = (int(Path(self.gtfs_path).stat().st_mtime)
+                         if self.gtfs_path and Path(self.gtfs_path).is_file() else 0)
         self.vehicles_url = self.cfg.get(
             "vehicles_url", "https://cdn.mbta.com/realtime/VehiclePositions.pb")
         self.radius_km = float(self.cfg.get("routes_radius_km", 8.0))
@@ -236,7 +246,7 @@ class TransitOverlays:
             self._routes = build_route_geojson(
                 self.gtfs_path, o.lat, o.lon, radius_km=self.radius_km,
                 cache=f"{self.cache_dir}/routes-{o.lat:.4f}_{o.lon:.4f}"
-                      f"-{self.radius_km:.0f}km.json",
+                      f"-{self.radius_km:.0f}km-f{self.feed_tag}.json",
             )
         return self._routes
 
@@ -252,7 +262,7 @@ class TransitOverlays:
                 self.gtfs_path, o.lat, o.lon, self.stations_radius_km,
                 kinds=kinds,
                 cache=f"{self.cache_dir}/stations-{o.lat:.4f}_{o.lon:.4f}"
-                      f"-{self.stations_radius_km:.0f}km.json")
+                      f"-{self.stations_radius_km:.0f}km-f{self.feed_tag}.json")
         return self._stations
 
     def _vehicle_tracker(self):
@@ -267,7 +277,7 @@ class TransitOverlays:
                 index = ShapeIndex.build(
                     self.gtfs_path, o.lat, o.lon, self.shapes_radius_km,
                     cache=f"{self.cache_dir}/shapeindex-{o.lat:.4f}_{o.lon:.4f}"
-                          f"-{self.shapes_radius_km:.0f}km.npz")
+                          f"-{self.shapes_radius_km:.0f}km-f{self.feed_tag}.npz")
             except Exception as exc:  # noqa: BLE001
                 # Without shapes, tracks fall back to straight lines between
                 # fixes. Degraded, not broken.

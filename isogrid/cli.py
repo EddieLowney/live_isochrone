@@ -316,6 +316,38 @@ def cmd_serve(args) -> None:
     serve(engine, host=args.host, port=args.port, autorun=not args.no_autorun)
 
 
+def cmd_publish(args) -> None:
+    """Run the pipeline as a writer of static files instead of a server."""
+    from .publish import MBTA_GTFS_URL, DirSink, FeedRefresher, R2Sink, run
+
+    cfg = _load(args)
+    sinks = []
+    if args.out:
+        sinks.append(DirSink(args.out))
+    if args.r2:
+        # Before the engine exists: missing credentials should fail in one
+        # second, not after a baseline.
+        sinks.append(R2Sink.from_env(gzip_bodies=not args.no_gzip))
+    if not sinks:
+        raise SystemExit("nothing to publish to: pass --out DIR, --r2, or both")
+    feed = None
+    gtfs = (cfg.raw.get("provider") or {}).get("gtfs_path")
+    if gtfs and not args.no_feed_refresh:
+        feed = FeedRefresher(gtfs, url=args.feed_url or MBTA_GTFS_URL,
+                             every_s=args.feed_check_hours * 3600)
+    engine = Engine(cfg.build())
+    # Feed refresh, baseline and first cycle happen inside `run`, in that order.
+    pub = run(engine, sinks, vehicles_s=args.vehicles_seconds, feed=feed, once=args.once)
+    if args.once:
+        print(json.dumps(pub.status_payload(), indent=2))
+
+
+def cmd_publish_check(args) -> None:
+    from .publish import check
+
+    raise SystemExit(0 if check(args.url, args.origin) else 1)
+
+
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(prog="isogrid", description=__doc__)
     p.add_argument("--config", default="config/prototype.yaml")
@@ -362,6 +394,23 @@ def main(argv=None) -> None:
     s.add_argument("--port", type=int, default=8000)
     s.add_argument("--no-autorun", action="store_true")
     s.set_defaults(fn=cmd_serve)
+    s = sub.add_parser("publish", help="write the map to static files every cycle")
+    s.add_argument("--out", metavar="DIR", help="write to a local directory")
+    s.add_argument("--r2", action="store_true",
+                   help="upload to Cloudflare R2 (credentials from R2_* env vars)")
+    s.add_argument("--no-gzip", action="store_true", help="upload R2 bodies uncompressed")
+    s.add_argument("--vehicles-seconds", type=float, default=10.0)
+    s.add_argument("--once", action="store_true",
+                   help="publish one cycle, print status, and exit")
+    s.add_argument("--feed-url", default=None, help="static GTFS to keep current")
+    s.add_argument("--feed-check-hours", type=float, default=6.0)
+    s.add_argument("--no-feed-refresh", action="store_true")
+    s.set_defaults(fn=cmd_publish)
+    s = sub.add_parser("publish-check",
+                       help="fetch published files the way a browser would")
+    s.add_argument("--url", required=True, help="public base URL of the bucket")
+    s.add_argument("--origin", default="https://eddielowney.github.io")
+    s.set_defaults(fn=cmd_publish_check)
 
     args = p.parse_args(argv)
     args.fn(args)

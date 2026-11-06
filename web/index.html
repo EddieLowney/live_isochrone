@@ -189,6 +189,7 @@
 </div>
 
 <script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+<script src="data-base.js"></script>
 <script>
 /* ------------------------------------------------------------------ *
  * EXTENSION POINT
@@ -208,6 +209,34 @@
  *   }
  * ------------------------------------------------------------------ */
 const OVERLAYS = [];
+
+//: Where the data comes from. On localhost: `isogrid serve` at /api, unless a
+//: `?data=` URL says otherwise. Anywhere else (GitHub Pages): the static files
+//: `isogrid publish` writes to R2, at the base URL in data-base.js. Keying on
+//: the hostname means the deployed URL can be committed without ever breaking
+//: local development.
+const DATA_BASE = (() => {
+  const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+  const q = new URLSearchParams(location.search).get('data');
+  return ((local ? q : window.ISOGRID_DATA_BASE) || '').replace(/\/+$/, '');
+})();
+const API_PATH = { config: 'config', surface: 'geojson', routes: 'routes.geojson',
+                   stations: 'stations.geojson', vehicles: 'vehicles.geojson' };
+const dataUrl = k => DATA_BASE ? `${DATA_BASE}/${k}.json` : `/api/${API_PATH[k]}`;
+//: Live files revalidate on every poll; the publisher marks them no-cache too.
+const LIVE = { cache: 'no-cache' };
+
+//: A static host keeps serving the last file it was given, so a stopped
+//: publisher looks exactly like a working one: fetches succeed, the map draws,
+//: and nothing says the data is an hour old. Past a few cycles, say so.
+const STALE_AFTER_S = 120;
+function staleNote(fc) {
+  const gen = Date.parse(((fc && fc.metadata) || {}).generated_at || '');
+  if (!gen) return '';
+  const age = (Date.now() - gen) / 1000;
+  if (age <= STALE_AFTER_S) return '';
+  return ` · data ${age < 3600 ? Math.round(age / 60) + ' min' : (age / 3600).toFixed(1) + ' h'} old`;
+}
 
 const S = { mode: 'delta', basemap: 'night', opacity: 0.55, cfg: null, map: null,
             poll: 20000, smooth: true };
@@ -277,17 +306,28 @@ const labelsOpacity = () =>
   (S.cfg && S.cfg.render.basemap && S.cfg.render.basemap.labels_opacity) ?? 0.65;
 const fillOpacity = () => ['case', MASKED, 0.10, S.opacity];
 
-//: CARTO publish label-free raster basemaps, free and keyless, built for
-//: exactly this: a ground layer that carries geography without competing with
+//: A label-free raster ground layer: geography without anything competing with
 //: the data on top. TomTom's raster `basic` bakes labels into the base tiles,
-//: so there is no way to remove them from that source — the `labels` overlay
-//: is a second copy drawn above the hexes, and hiding it leaves the originals.
+//: so there is no way to remove them from that source — the `labels` overlay is
+//: a second copy drawn above the hexes, and hiding it leaves the originals.
+//:
+//: Esri's Canvas services, not CARTO. CARTO's keyless raster endpoints began
+//: requiring an API key, and they signal it in the worst possible way: HTTP 200
+//: with a valid PNG whose pixels read "API KEY REQUIRED". Nothing errors, no
+//: request fails, and the map quietly fills with placeholder tiles. These are
+//: served without a key and tile normally.
+//:
+//: Note the {z}/{y}/{x} order — Esri puts row before column, and getting it
+//: wrong yields tiles that load but show the wrong place.
+const ESRI_CANVAS =
+  "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas";
 const NOLABEL_TILES = {
-  night: ['a', 'b', 'c', 'd'].map(s =>
-    `https://${s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}.png`),
-  main: ['a', 'b', 'c', 'd'].map(s =>
-    `https://${s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}.png`),
+  night: [`${ESRI_CANVAS}/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}`],
+  main: [`${ESRI_CANVAS}/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}`],
 };
+//: The Canvas services stop at z16; past it MapLibre overzooms the last real
+//: tile rather than requesting the blank one the server would return.
+const NOLABEL_MAXZOOM = 16;
 
 function styleSpec() {
   const base = (S.cfg && S.cfg.render.basemap) || {};
@@ -295,7 +335,7 @@ function styleSpec() {
   const attrib = labelled
     ? '&copy; TomTom'
     : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' +
-      ' contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>';
+      ' contributors, Tiles &copy; Esri';
   const origin = location.origin;
   return {
     version: 8,
@@ -303,7 +343,8 @@ function styleSpec() {
       base: labelled
         ? { type: 'raster', tileSize: 512, attribution: attrib, maxzoom: 20,
             tiles: [`${origin}/tiles/basic/${S.basemap}/{z}/{x}/{y}.png`] }
-        : { type: 'raster', tileSize: 256, attribution: attrib, maxzoom: 20,
+        : { type: 'raster', tileSize: 256, attribution: attrib,
+            maxzoom: NOLABEL_MAXZOOM,
             tiles: NOLABEL_TILES[S.basemap] || NOLABEL_TILES.night },
       // Transparent overlay carrying only labels, precisely aligned with the
       // base layer. Drawn ABOVE the hex fill so street names stay readable
@@ -986,7 +1027,7 @@ function colourVehicles(fc) {
 async function loadRoutes() {
   if (!S.map || !S.map.getSource('routes')) return;
   try {
-    const fc = await (await fetch('/api/routes.geojson')).json();
+    const fc = await (await fetch(dataUrl('routes'))).json();
     for (const f of fc.features) ROUTE_COLORS[f.properties.route_id] = f.properties.color;
     S.map.getSource('routes').setData(fc);
     S.routeCount = (fc.metadata || {}).routes || fc.features.length;
@@ -996,7 +1037,7 @@ async function loadRoutes() {
 async function loadStations() {
   if (!S.map || !S.map.getSource('stations')) return;
   try {
-    const fc = await (await fetch('/api/stations.geojson')).json();
+    const fc = await (await fetch(dataUrl('stations'))).json();
     S.map.getSource('stations').setData(fc);
     S.stationCount = (fc.metadata || {}).stations ?? fc.features.length;
   } catch (err) { /* optional overlay */ }
@@ -1005,7 +1046,7 @@ async function loadStations() {
 async function loadVehicles() {
   if (!S.map || !S.map.getSource('vehicles')) return;
   try {
-    const fc = await (await fetch('/api/vehicles.geojson')).json();
+    const fc = await (await fetch(dataUrl('vehicles'), LIVE)).json();
     colourVehicles(fc);
     S.vehicleMeta = fc.metadata || {};
   } catch (err) { /* leave the last positions in place */ }
@@ -1020,14 +1061,15 @@ function fitToCells(fc) {
 async function refresh(first) {
   try {
     if (!S.cfg) {
-      S.cfg = await (await fetch('/api/config')).json();
+      S.cfg = await (await fetch(dataUrl('config'))).json();
       S.poll = (S.cfg.render.poll_seconds || 20) * 1000;
       document.getElementById('title').textContent = S.cfg.origin.label || 'Travel time field';
     }
-    const fc = await (await fetch('/api/geojson')).json();
+    const fc = await (await fetch(dataUrl('surface'), LIVE)).json();
     S.last = fc;
     document.getElementById('subtitle').textContent =
-      `${S.cfg.grid.cells} cells · ${S.cfg.grid.cell_km} km · ${S.cfg.provider.name}`;
+      `${S.cfg.grid.cells} cells · ${S.cfg.grid.cell_km} km · ${S.cfg.provider.name}`
+      + staleNote(fc);
     if (S.map && S.map.getSource && S.map.getSource('cells')) {
       S.map.getSource('cells').setData(paintFeatures(fc));
       updateField(fc);
@@ -1045,7 +1087,8 @@ async function refresh(first) {
     if (first && S.map && fc.features.length) fitToCells(fc);
     paintRail(fc);
   } catch (err) {
-    document.getElementById('subtitle').textContent = 'server unreachable — retrying';
+    document.getElementById('subtitle').textContent =
+      `${DATA_BASE ? 'data' : 'server'} unreachable — retrying`;
   }
 }
 
@@ -1286,7 +1329,7 @@ document.getElementById('opacity').oninput = e => {
   if (S.map.getLayer('field')) S.map.setPaintProperty('field', 'raster-opacity', S.opacity);
 };
 
-fetch('/api/config').then(r => r.json()).then(cfg => {
+fetch(dataUrl('config')).then(r => r.json()).then(cfg => {
   S.cfg = cfg;
   S.poll = (cfg.render.poll_seconds || 20) * 1000;
   paintRamp();

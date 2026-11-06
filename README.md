@@ -674,6 +674,91 @@ python3 tests/test_isogrid.py     # 19 tests, no pytest required
 The budget tests include a threaded race against the sqlite ledger, because a
 quota that is merely usually respected is not a quota.
 
+## Hosting it: GitHub Pages + R2
+
+GitHub Pages serves files and cannot run code, so the computation moves to a
+long-running process that writes its results somewhere public:
+
+```
+MBTA GTFS-RT ──> isogrid publish ──> R2 bucket (JSON) <── page on GitHub Pages
+                 (Mac now, Oracle later)
+```
+
+`publish` runs the same engine as `serve`, but writes each payload out instead
+of answering requests. The files are byte-for-byte what the matching `/api`
+endpoint returns, so the page differs only in where it fetches from.
+
+| File | Written | Equivalent |
+|---|---|---|
+| `surface.json` | every cycle (30 s) | `/api/geojson` |
+| `vehicles.json` | every 10 s, on its own thread | `/api/vehicles.geojson` |
+| `status.json` | every cycle | last cycle report, write errors, feed state |
+| `config.json`, `routes.json`, `stations.json` | at start, and when the feed changes | `/api/config`, … |
+
+```bash
+# A local directory: the whole loop, no cloud account needed.
+python3 -m isogrid.cli --config config/mbta-raptor.yaml publish --out data/site
+
+# R2 (credentials from .env — see deploy/r2.env.example).
+set -a; source .env; set +a
+python3 -m isogrid.cli --config config/mbta-raptor.yaml publish --r2
+
+# Check the bucket the way a browser on GitHub Pages would see it.
+python3 -m isogrid.cli publish-check --url https://pub-XXXX.r2.dev
+```
+
+`publish-check` exists because the three likeliest faults all fail silently:
+public access off, a CORS rule that does not cover the page's origin, and a
+gzipped body served without `Content-Encoding` — which reaches the page as
+binary and fails the JSON parse with nothing to say why.
+
+**Where the page reads from** is decided by hostname. On `localhost` it always
+uses `/api` (or a `?data=<url>` override), so the R2 URL committed in
+`web/data-base.js` can never break local development. Anywhere else it reads
+`ISOGRID_DATA_BASE`.
+
+### One-time setup
+
+1. **R2** (Cloudflare dashboard): create a bucket; *Settings → Public access* →
+   allow the `r2.dev` subdomain and copy its URL; *Settings → CORS policy* →
+   paste `deploy/r2-cors.json`; *R2 → Manage API tokens* → an *Object Read &
+   Write* token scoped to that bucket. Copy `deploy/r2.env.example` to `.env`
+   and fill it in. `.env` is git-ignored.
+2. **Pages**: put the `r2.dev` URL in `web/data-base.js` and push. *Settings →
+   Pages → Source: GitHub Actions*. `.github/workflows/pages.yml` deploys `web/`
+   on every push that touches it.
+
+3. **Server**: on the machine that will run the loop, clone the repo, create
+   `.venv`, install `requirements.txt` and `osmium-tool`, copy
+   `otp/boston.osm.pbf` across (the GTFS feed downloads itself), fill in `.env`,
+   and install `deploy/isogrid-publish.service`. That unit restarts the
+   publisher if it exits and starts it at boot. Only one publisher should write
+   to the bucket at a time, so stop any local `publish --r2` first.
+
+### Running unattended
+
+- **The static feed is refreshed, not loaded once.** MBTA's timetable covers
+  about a month and is republished every week or two. Loaded once, a
+  long-running service eventually routes against a calendar that no longer
+  contains today: the checked-in feed expired on 5 September, and by November
+  transit beat walking on 63 cells rather than ~1,700. `publish` checks every
+  six hours with a conditional GET, validates a new feed before replacing the
+  old one (kept as `.prev`), and the engine adopts it at the 03:00 rollover.
+  Every derived cache is keyed by feed as well as date, so a restart after an
+  update can never index the new feed's stops with the old feed's arrays.
+- **A stopped publisher still looks alive.** R2 keeps serving the last file it
+  was given. The page says *data N min old* once the surface is more than two
+  minutes stale.
+- **Expect one slow cycle after each start and each 03:00.** The quarantine
+  mask engages on cycle 4, changing the requested cell set and forcing a ~40 s
+  egress rebuild. The scheduler absorbs the overrun; the matrix is cached after.
+- **The archive grows.** At 30 s cycles with `archive_every: 20` this config
+  writes ~560k observations a day, roughly 120 MB/day or 40 GB/year. Plan the
+  disk, or raise `archive_every`.
+- **Cost.** Writes are ~430k/month against R2's 1M free; egress is free. A
+  browser tab left open costs ~650k reads/month against 10M free. The `r2.dev`
+  URL is rate-limited and meant for development; a custom domain lifts that.
+
 ## Going live with TomTom
 
 The recommended first provider: the free tier needs no credit card, and TomTom
